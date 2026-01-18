@@ -679,7 +679,7 @@ template <bool OS> bool Voice::processWithOS()
             processorType[i] = proct;
             // this is copied below in the init.
             processors[i] = dsp::processor::spawnProcessorInPlace(
-                processorType[i], zone->getEngine()->getMemoryPool().get(),
+                processorType[i], zone->getEngine(), zone->getEngine()->getMemoryPool().get(),
                 processorPlacementStorage[i], dsp::processor::processorMemoryBufferSize,
                 zone->processorStorage[i], endpoints->processorTarget[i].fp, processorIntParams[i],
                 forceOversample, false);
@@ -1090,7 +1090,7 @@ void Voice::initializeProcessors()
         {
             // this init code is partly copied above in the voice state toggle
             processors[i] = dsp::processor::spawnProcessorInPlace(
-                processorType[i], zone->getEngine()->getMemoryPool().get(),
+                processorType[i], zone->getEngine(), zone->getEngine()->getMemoryPool().get(),
                 processorPlacementStorage[i], dsp::processor::processorMemoryBufferSize,
                 zone->processorStorage[i], endpoints->processorTarget[i].fp, processorIntParams[i],
                 forceOversample, false);

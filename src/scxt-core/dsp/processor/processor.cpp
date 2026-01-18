@@ -28,6 +28,7 @@
 #include "processor.h"
 #include "datamodel/metadata.h"
 #include "processor_defs.h"
+#include "engine/engine.h"
 
 #include <functional>
 #include <new>
@@ -176,7 +177,7 @@ template <size_t I> remapFn_t implGetRemapFn()
 }
 
 template <size_t I>
-Processor *returnSpawnOnto(uint8_t *m, engine::MemoryPool *mp, const ProcessorStorage &ps, float *f,
+Processor *returnSpawnOnto(uint8_t *m, engine::Engine *e, engine::MemoryPool *mp, const ProcessorStorage &ps, float *f,
                            int *i, bool needsMetadata)
 {
     if constexpr (I == ProcessorType::proct_none)
@@ -189,23 +190,23 @@ Processor *returnSpawnOnto(uint8_t *m, engine::MemoryPool *mp, const ProcessorSt
     else
     {
         auto mem =
-            new (m) typename ProcessorImplementor<(ProcessorType)I>::T(mp, ps, f, i, needsMetadata);
+            new (m) typename ProcessorImplementor<(ProcessorType)I>::T(e, mp, ps, f, i, needsMetadata);
         return mem;
     }
 }
 
 template <size_t... Is>
-auto spawnOnto(size_t ft, uint8_t *m, engine::MemoryPool *mp, const ProcessorStorage &ps, float *f,
+auto spawnOnto(size_t ft, uint8_t *m, engine::Engine *e, engine::MemoryPool *mp, const ProcessorStorage &ps, float *f,
                int *i, bool needsMetadata, std::index_sequence<Is...>)
 {
-    using FuncType = Processor *(*)(uint8_t *, engine::MemoryPool *, const ProcessorStorage &,
+    using FuncType = Processor *(*)(uint8_t *, engine::Engine *,engine::MemoryPool *, const ProcessorStorage &,
                                     float *, int *, bool);
     constexpr FuncType arFuncs[] = {detail::returnSpawnOnto<Is>...};
-    return arFuncs[ft](m, mp, ps, f, i, needsMetadata);
+    return arFuncs[ft](m, e, mp, ps, f, i, needsMetadata);
 }
 
 template <size_t I>
-Processor *returnSpawnOntoOS(uint8_t *m, engine::MemoryPool *mp, const ProcessorStorage &ps,
+Processor *returnSpawnOntoOS(uint8_t *m, engine::Engine *e, engine::MemoryPool *mp, const ProcessorStorage &ps,
                              float *f, int *i, bool needsMetadata)
 {
     if constexpr (I == ProcessorType::proct_none)
@@ -219,19 +220,19 @@ Processor *returnSpawnOntoOS(uint8_t *m, engine::MemoryPool *mp, const Processor
     else
     {
         auto mem = new (m)
-            typename ProcessorImplementor<(ProcessorType)I>::TOS(mp, ps, f, i, needsMetadata);
+            typename ProcessorImplementor<(ProcessorType)I>::TOS(e, mp, ps, f, i, needsMetadata);
         return mem;
     }
 }
 
 template <size_t... Is>
-auto spawnOntoOS(size_t ft, uint8_t *m, engine::MemoryPool *mp, const ProcessorStorage &ps,
+auto spawnOntoOS(size_t ft, uint8_t *m, engine::Engine *e, engine::MemoryPool *mp, const ProcessorStorage &ps,
                  float *f, int *i, bool needsMetadata, std::index_sequence<Is...>)
 {
-    using FuncType = Processor *(*)(uint8_t *, engine::MemoryPool *, const ProcessorStorage &,
+    using FuncType = Processor *(*)(uint8_t *, engine::Engine *e, engine::MemoryPool *, const ProcessorStorage &,
                                     float *, int *, bool);
     constexpr FuncType arFuncs[] = {detail::returnSpawnOntoOS<Is>...};
-    return arFuncs[ft](m, mp, ps, f, i, needsMetadata);
+    return arFuncs[ft](m, e, mp, ps, f, i, needsMetadata);
 }
 } // namespace detail
 
@@ -363,7 +364,7 @@ processorList_t getAllProcessorDescriptions()
  * Spawn with in-place new onto a pre-allocated block. The memory must
  * be a 16byte aligned block of at least size processorMemoryBufferSize.
  */
-Processor *spawnProcessorInPlace(ProcessorType id, engine::MemoryPool *mp, uint8_t *memory,
+Processor *spawnProcessorInPlace(ProcessorType id, engine::Engine *e, engine::MemoryPool *mp, uint8_t *memory,
                                  size_t memorySize, const ProcessorStorage &ps, float *f, int *i,
                                  bool oversample, bool needsMetadata)
 {
@@ -375,13 +376,13 @@ Processor *spawnProcessorInPlace(ProcessorType id, engine::MemoryPool *mp, uint8
     if (oversample)
     {
         return detail::spawnOntoOS(
-            id, memory, mp, ps, f, i, needsMetadata,
+            id, memory, e, mp, ps, f, i, needsMetadata,
             std::make_index_sequence<(size_t)ProcessorType::proct_num_types>());
     }
     else
     {
         return detail::spawnOnto(
-            id, memory, mp, ps, f, i, needsMetadata,
+            id, memory, e, mp, ps, f, i, needsMetadata,
             std::make_index_sequence<(size_t)ProcessorType::proct_num_types>());
     }
 }

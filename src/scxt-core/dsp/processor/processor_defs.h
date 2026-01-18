@@ -36,6 +36,7 @@
 #include <sst/filters/HalfRateFilter.h>
 #include "sst/basic-blocks/dsp/BlockInterpolators.h"
 #include "configuration.h"
+#include "engine/engine.h"
 
 /**
  * Adding a processor here. Used to be we had a bunch of case staements. But now we are all
@@ -265,7 +266,8 @@ DEFINE_PROC(UtilityFilters, sst::voice_effects::filter::UtilityFilters<SCXTVFXCo
             "Utility Filter", "Filters");
 
 DEFINE_PROC(TiltEQ, sst::voice_effects::eq::TiltEQ<SCXTVFXConfig<1>>,
-            sst::voice_effects::eq::TiltEQ<SCXTVFXConfig<2>>, proct_eq_tilt, "Tilt EQ", "EQ");
+            sst::voice_effects::eq::TiltEQ<SCXTVFXConfig<2>>, proct_eq_tilt, "Tilt EQ", "EQ",
+            engine->rng);
 DEFINE_PROC(VolPan, sst::voice_effects::utilities::VolumeAndPan<SCXTVFXConfig<1>>,
             sst::voice_effects::utilities::VolumeAndPan<SCXTVFXConfig<2>>, proct_volpan,
             "Volume & Pan", "Utility");
