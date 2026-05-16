@@ -32,6 +32,14 @@ add_library(${PROJECT_NAME} STATIC
         sample/loaders/load_flac.cpp
         sample/loaders/load_mp3.cpp
 
+        sample/import_support/import_harness.cpp
+        sample/import_support/import_mapping.cpp
+        sample/import_support/import_loop.cpp
+        sample/import_support/import_envelope.cpp
+        sample/import_support/import_filter.cpp
+        sample/import_support/import_lfo.cpp
+        sample/import_support/import_modulation.cpp
+
         sample/exs_support/exs_import.cpp
         sample/exs_support/exs_compound_file_impl.cpp
         sample/akai_support/akai_import.cpp

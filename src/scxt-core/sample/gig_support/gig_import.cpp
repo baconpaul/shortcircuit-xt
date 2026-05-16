@@ -26,6 +26,8 @@
  */
 
 #include "gig_import.h"
+#include "sample/import_support/import_harness.h"
+#include "sample/import_support/import_mapping.h"
 
 #include "gig.h"
 
@@ -38,23 +40,14 @@ namespace scxt::gig_support
 {
 bool importGIG(const fs::path &p, engine::Engine &e, int preset)
 {
-    auto &messageController = e.getMessageController();
-    assert(messageController->threadingChecker.isSerialThread());
-
+    import_support::ImporterContext ctx(e, "Loading GIG '" + p.filename().u8string() + "'");
     SCLOG_IF(sampleCompoundParsers, "Loading " << p.u8string() << " ps=" << preset);
-
-    auto cng = messaging::MessageController::ClientActivityNotificationGuard(
-        "Loading GIG '" + p.filename().u8string() + "'", *(messageController));
 
     try
     {
         auto riff = std::make_unique<RIFF::File>(p.u8string());
         auto gig = std::make_unique<gig::File>(riff.get());
         auto md5 = infrastructure::createMD5SumFromFile(p);
-
-        auto pt = e.getSelectionManager()->selectedPart;
-
-        auto &part = e.getPatch()->getPart(pt);
 
         auto spc = 0;
         auto epc = gig->Instruments;
@@ -64,8 +57,6 @@ bool importGIG(const fs::path &p, engine::Engine &e, int preset)
             spc = preset;
             epc = preset + 1;
         }
-
-        std::map<gig::Instrument *, int> instToGroup;
 
         std::map<gig::Sample *, int> sampleToIndex;
         auto smp = gig->GetFirstSample();
@@ -77,7 +68,6 @@ bool importGIG(const fs::path &p, engine::Engine &e, int preset)
             si++;
         }
 
-        int firstGroup{-1};
         for (int pc = spc; pc < epc; ++pc)
         {
             auto *preset = gig->GetInstrument(pc);
@@ -86,14 +76,9 @@ bool importGIG(const fs::path &p, engine::Engine &e, int preset)
                 pnm = preset->pInfo->Name;
 
             // For now put it all in one group
-            auto grNum = part->addGroup() - 1;
-            auto &group = part->getGroup(grNum);
-            group->name = pnm;
-            if (firstGroup < 0)
-                firstGroup = grNum;
+            auto grNum = ctx.addGroup(pnm);
 
             auto region = preset->GetFirstRegion();
-            int j = 0;
             while (region)
             {
                 if (region->pInfo && !region->pInfo->Name.empty())
@@ -118,9 +103,6 @@ bool importGIG(const fs::path &p, engine::Engine &e, int preset)
                     continue;
                 auto sidx = sampleToIndex[sfsamp];
 
-                // messageController->updateClientActivityNotification("Loading " +
-                // p.filename().u8string()+ " sample " +
-                //                                                                     std::to_string(j));
                 auto sid = e.getSampleManager()->loadSampleFromGIG(p, md5, gig.get(), -1, -1, sidx);
                 if (!sid.has_value())
                     continue;
@@ -129,46 +111,40 @@ bool importGIG(const fs::path &p, engine::Engine &e, int preset)
                 auto zn = std::make_unique<engine::Zone>(*sid);
                 zn->engine = &e;
 
-                zn->mapping.keyboardRange = {region->KeyRange.low, region->KeyRange.high};
-                zn->mapping.velocityRange = {region->VelocityRange.low, region->VelocityRange.high};
-
-                zn->mapping.rootKey = dim->UnityNote;
+                import_support::importZoneMapping(*zn, ctx,
+                                                  {
+                                                      .rootKey = dim->UnityNote,
+                                                      .keyStart = region->KeyRange.low,
+                                                      .keyEnd = region->KeyRange.high,
+                                                      .velStart = region->VelocityRange.low,
+                                                      .velEnd = region->VelocityRange.high,
+                                                  });
 
                 if (!zn->attachToSample(*(e.getSampleManager())))
-                {
-                    RAISE_ERROR_CONT(*messageController, "GIG Load Error",
-                                     "Zone Unable to Attach to Sample");
-                    return false;
-                }
+                    return ctx.fail("GIG Load Error", "Zone Unable to Attach to Sample");
 
                 /*
                  * At this point, look at gig_dump.cpp and go ahead and start porting in features
                  * like we did for sf2.
                  */
 
-                group->addZone(zn);
+                ctx.addZoneToGroup(grNum, std::move(zn));
                 region = preset->GetNextRegion();
-                ++j;
             }
         }
-
-        e.getSelectionManager()->applySelectActions(
-            {pt, firstGroup, firstGroup >= 0 ? 0 : -1, true, true, true});
     }
-    catch (RIFF::Exception e)
+    catch (RIFF::Exception ex)
     {
-        RAISE_ERROR_CONT(*messageController, "GIG Load Error", e.Message);
-        return false;
+        return ctx.fail("GIG Load Error", ex.Message);
     }
-    catch (const SCXTError &e)
+    catch (const SCXTError &ex)
     {
-        RAISE_ERROR_CONT(*messageController, "GIG Load Error", e.what());
-        return false;
+        return ctx.fail("GIG Load Error", ex.what());
     }
     catch (...)
     {
         return false;
     }
-    return true;
+    return ctx.finish();
 }
 } // namespace scxt::gig_support

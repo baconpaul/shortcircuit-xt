@@ -26,6 +26,9 @@
  */
 
 #include "akai_import.h"
+#include "sample/import_support/import_harness.h"
+#include "sample/import_support/import_mapping.h"
+#include "sample/import_support/import_numeric.h"
 #include <fstream>
 #include <map>
 #include <algorithm>
@@ -433,17 +436,12 @@ bool AKPFile::load(const char *data, size_t size)
 
 bool importAKP(const fs::path &path, engine::Engine &e)
 {
-    auto &messageController = e.getMessageController();
-    assert(messageController->threadingChecker.isSerialThread());
-
-    auto cng = messaging::MessageController::ClientActivityNotificationGuard(
-        "Loading AKP '" + path.filename().u8string() + "'", *(messageController));
+    import_support::ImporterContext ctx(e, "Loading AKP '" + path.filename().u8string() + "'");
 
     auto f = std::ifstream(path, std::ios::binary);
     if (!f.is_open())
-    {
-        return false;
-    }
+        return ctx.fail("AKP Load Error", "Cannot open file");
+
     f.seekg(0, std::ios::end);
     auto size = f.tellg();
     f.seekg(0, std::ios::beg);
@@ -452,36 +450,18 @@ bool importAKP(const fs::path &path, engine::Engine &e)
 
     AKPFile akp;
     if (!akp.load(buffer.data(), size))
-    {
-        return false;
-    }
+        return ctx.fail("AKP Load Error", "Failed to parse AKP file");
 
     auto rootDir = path.parent_path();
-
-    auto pt = std::clamp(e.getSelectionManager()->selectedPart, (int16_t)0, (int16_t)numParts);
-    auto &part = e.getPatch()->getPart(pt);
-
     std::map<uint16_t, int> akaiGroupToSCGroup;
-    std::vector<selection::SelectionManager::SelectActionContents> selectionActions;
 
     for (size_t i = 0; i < akp.keygroups.size(); ++i)
     {
         const auto &kg = akp.keygroups[i];
 
-        int groupId = -1;
-        if (akaiGroupToSCGroup.find(kg.kloc.grp) == akaiGroupToSCGroup.end())
-        {
-            groupId = part->addGroup() - 1;
-            akaiGroupToSCGroup[kg.kloc.grp] = groupId;
-            auto &group = part->getGroup(groupId);
-            group->name = "AKP Group " + std::to_string(kg.kloc.grp);
-        }
-        else
-        {
-            groupId = akaiGroupToSCGroup[kg.kloc.grp];
-        }
-
-        auto &group = part->getGroup(groupId);
+        int groupId = import_support::getOrCreateGroup(ctx, akaiGroupToSCGroup, kg.kloc.grp, [&] {
+            return "AKP Group " + std::to_string(kg.kloc.grp);
+        });
 
         for (const auto &z : kg.zones)
         {
@@ -522,35 +502,26 @@ bool importAKP(const fs::path &path, engine::Engine &e)
             }
 
             auto zn = std::make_unique<engine::Zone>(sid);
-            zn->mapping.keyboardRange.keyStart = kg.kloc.lo;
-            zn->mapping.keyboardRange.keyEnd = kg.kloc.hi;
-            zn->mapping.velocityRange.velStart = z.lov;
-            zn->mapping.velocityRange.velEnd = z.hiv;
-
-            zn->mapping.rootKey = kg.kloc.lo + (kg.kloc.semi - 60); // This might be wrong, need to
-                                                                    // check Akai root key logic
-            // zn->mapping.rootKey = 60; // Default
+            import_support::importZoneMapping(
+                *zn, ctx,
+                {
+                    // This might be wrong, need to check Akai root key logic
+                    .rootKey = kg.kloc.lo + (kg.kloc.semi - 60),
+                    .keyStart = kg.kloc.lo,
+                    .keyEnd = kg.kloc.hi,
+                    .velStart = z.lov,
+                    .velEnd = z.hiv,
+                    .pitchOffsetSemitones =
+                        z.semiTune + import_support::centsToSemitones((float)z.fineTune),
+                });
 
             // If the sample itself has a root key, it will be loaded by attachToSample
             zn->attachToSample(*e.getSampleManager());
 
-            // Adjust by AKP's tuning
-            zn->mapping.pitchOffset = z.semiTune + z.fineTune * 0.01;
-
-            int zoneIdx = group->getZones().size();
-            group->addZone(zn);
-
-            selectionActions.emplace_back(pt, groupId, zoneIdx, true, false, false);
+            ctx.addZoneToGroup(groupId, std::move(zn));
         }
     }
-
-    if (!selectionActions.empty())
-    {
-        selectionActions.back().selectingAsLead = true;
-        e.getSelectionManager()->applySelectActions(selectionActions);
-    }
-
-    return true;
+    return ctx.finish();
 }
 
 void dumpAkaiToLog(const fs::path &path)

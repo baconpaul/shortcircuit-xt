@@ -26,6 +26,14 @@
  */
 
 #include "sf2_import.h"
+#include "sample/import_support/import_harness.h"
+#include "sample/import_support/import_mapping.h"
+#include "sample/import_support/import_loop.h"
+#include "sample/import_support/import_envelope.h"
+#include "sample/import_support/import_filter.h"
+#include "sample/import_support/import_lfo.h"
+#include "sample/import_support/import_modulation.h"
+#include "sample/import_support/import_numeric.h"
 
 #include "gig.h"
 #include "SF.h"
@@ -39,24 +47,15 @@ namespace scxt::sf2_support
 {
 bool importSF2(const fs::path &p, engine::Engine &e, int preset)
 {
-    auto &messageController = e.getMessageController();
-    assert(messageController->threadingChecker.isSerialThread());
+    import_support::ImporterContext ctx(e, "Loading SF2 '" + p.filename().u8string() + "'");
 
     SCLOG_IF(sampleLoadAndPurge, "Loading SF2 Preset: " << p.u8string() << " preset=" << preset);
-
-    auto cng = messaging::MessageController::ClientActivityNotificationGuard("Loading SF2",
-                                                                             *(messageController));
 
     try
     {
         auto riff = std::make_unique<RIFF::File>(p.u8string());
         auto sf = std::make_unique<sf2::File>(riff.get());
         auto md5 = infrastructure::createMD5SumFromFile(p);
-
-        auto pt = e.getSelectionManager()->selectedPart;
-
-        auto &part = e.getPatch()->getPart(pt);
-        int firstGroup = -1;
 
         auto spc = 0;
         auto epc = sf->GetPresetCount();
@@ -79,15 +78,9 @@ bool importSF2(const fs::path &p, engine::Engine &e, int preset)
                 auto *presetRegion = preset->GetRegion(i);
                 sf2::Instrument *instr = presetRegion->pInstrument;
 
-                if (instToGroup.find(instr) == instToGroup.end())
-                {
-                    auto gnum = part->addGroup() - 1;
-                    auto &group = part->getGroup(gnum);
-                    group->name = std::string(instr->GetName()) + " / " + pnm;
-                    instToGroup[instr] = gnum;
-                }
-                auto grpnum = instToGroup[instr];
-                auto &grp = part->getGroup(grpnum);
+                auto grpnum = import_support::getOrCreateGroup(ctx, instToGroup, instr, [&] {
+                    return std::string(instr->GetName()) + " / " + pnm;
+                });
 
                 if (instr->pGlobalRegion)
                 {
@@ -105,19 +98,8 @@ bool importSF2(const fs::path &p, engine::Engine &e, int preset)
                         continue;
                     e.getSampleManager()->getSample(*sid)->md5Sum = md5;
 
-                    if (firstGroup < 0)
-                        firstGroup = grpnum;
                     auto zn = std::make_unique<engine::Zone>(*sid);
                     zn->engine = &e;
-
-                    if (region->overridingRootKey >= 0)
-                    {
-                        zn->mapping.rootKey = region->overridingRootKey;
-                    }
-                    else
-                    {
-                        zn->mapping.rootKey += sfsamp->OriginalPitch - 60;
-                    }
 
                     auto noneOr = [](auto a, auto b, auto c) {
                         if (a != sf2::NONE)
@@ -129,111 +111,81 @@ bool importSF2(const fs::path &p, engine::Engine &e, int preset)
 
                     auto lk = noneOr(region->loKey, presetRegion->loKey, (int)0);
                     auto hk = noneOr(region->hiKey, presetRegion->hiKey, (int)127);
-                    zn->mapping.keyboardRange = {lk, hk};
-
                     auto lv = noneOr(region->minVel, presetRegion->minVel, 0);
                     auto hv = noneOr(region->maxVel, presetRegion->maxVel, 127);
-                    zn->mapping.velocityRange = {lv, hv};
 
                     // SF2 pitch correction is a *signed* char in cents.
                     auto pcv = static_cast<int>(static_cast<int8_t>(sfsamp->PitchCorrection));
-                    zn->mapping.pitchOffset = 1.0 * pcv / 100.0;
+                    auto pitchOffsetSemitones =
+                        import_support::centsToSemitones((float)pcv) +
+                        import_support::centsToSemitones(
+                            (float)(region->GetCoarseTune(presetRegion) * 100 +
+                                    region->GetFineTune(presetRegion)));
+
+                    int rootKey = (region->overridingRootKey >= 0) ? region->overridingRootKey
+                                                                   : sfsamp->OriginalPitch;
+                    import_support::importZoneMapping(
+                        *zn, ctx,
+                        {
+                            .rootKey = rootKey,
+                            .keyStart = lk,
+                            .keyEnd = hk,
+                            .velStart = lv,
+                            .velEnd = hv,
+                            .pitchOffsetSemitones = pitchOffsetSemitones,
+                        });
                     if (!zn->attachToSample(*(e.getSampleManager())))
-                    {
-                        SCLOG_IF(warnings, "ERROR: Can't attach to sample");
-                        return false;
-                    }
-                    auto &znSD = zn->variantData.variants[0];
+                        return ctx.fail("SF2 Load Error", "Can't attach to sample");
 
-                    auto pn = region->GetPan(presetRegion);
-                    // pan in SF2 is -64 to 63 so hackety hack a bit
-                    if (pn < 0)
-                        zn->mapping.pan = pn / 64.f;
-                    else
-                        zn->mapping.pan = pn / 63.f;
+                    import_support::importZoneEnvelope(
+                        *zn, ctx, 0,
+                        {
+                            .delaySeconds = (float)region->GetEG1PreAttackDelay(presetRegion),
+                            .attackSeconds = (float)region->GetEG1Attack(presetRegion),
+                            .holdSeconds = (float)region->GetEG1Hold(presetRegion),
+                            .decaySeconds = (float)region->GetEG1Decay(presetRegion),
+                            .sustainLevel = import_support::centibelsToLinear(
+                                region->GetEG1Sustain(presetRegion)),
+                            .releaseSeconds = (float)region->GetEG1Release(presetRegion),
+                        });
 
-                    using namespace std;
-                    auto s = sfsamp;
-
-                    zn->mapping.pitchOffset += region->GetCoarseTune(presetRegion) +
-                                               region->GetFineTune(presetRegion) * 0.01;
-
-                    auto s2a = scxt::modulation::secondsToNormalizedEnvTime;
-
-                    auto sus2l = [](double sus) {
-                        auto db = -sus / 10;
-                        return pow(10.0, db * 0.05);
-                    };
-
-                    zn->egStorage[0].dly = s2a(region->GetEG1PreAttackDelay(presetRegion));
-                    zn->egStorage[0].a = s2a(region->GetEG1Attack(presetRegion));
-                    zn->egStorage[0].h = s2a(region->GetEG1Hold(presetRegion));
-                    zn->egStorage[0].d = s2a(region->GetEG1Decay(presetRegion));
-                    zn->egStorage[0].s = sus2l(region->GetEG1Sustain(presetRegion));
-                    zn->egStorage[0].r = s2a(region->GetEG1Release(presetRegion));
-
-                    auto GetValue = [](const auto &val) {
-                        if (val == sf2::NONE)
-                            return ToString("NONE");
-                        return ToString(val);
-                    };
-
-                    zn->egStorage[1].dly = s2a(region->GetEG2PreAttackDelay(presetRegion));
-                    zn->egStorage[1].a = s2a(region->GetEG2Attack(presetRegion));
-                    zn->egStorage[1].h = s2a(region->GetEG2Hold(presetRegion));
-                    zn->egStorage[1].d = s2a(region->GetEG2Decay(presetRegion));
-                    zn->egStorage[1].s = sus2l(region->GetEG2Sustain(presetRegion));
-                    zn->egStorage[1].r = s2a(region->GetEG2Release(presetRegion));
+                    auto egModHandle = import_support::importZoneEnvelope(
+                        *zn, ctx, 1,
+                        {
+                            .delaySeconds = (float)region->GetEG2PreAttackDelay(presetRegion),
+                            .attackSeconds = (float)region->GetEG2Attack(presetRegion),
+                            .holdSeconds = (float)region->GetEG2Hold(presetRegion),
+                            .decaySeconds = (float)region->GetEG2Decay(presetRegion),
+                            .sustainLevel = import_support::centibelsToLinear(
+                                region->GetEG2Sustain(presetRegion)),
+                            .releaseSeconds = (float)region->GetEG2Release(presetRegion),
+                        });
 
                     if (region->HasLoop)
                     {
-                        znSD.loopActive = true;
-                        znSD.startLoop = region->LoopStart;
-                        znSD.endLoop = region->LoopEnd;
+                        import_support::importZoneLoop(*zn, ctx, 0,
+                                                       {
+                                                           .startSamples = region->LoopStart,
+                                                           .endSamples = region->LoopEnd,
+                                                           .active = true,
+                                                       });
                     }
                     else if (presetRegion->HasLoop)
                     {
-                        znSD.loopActive = true;
-                        znSD.startLoop = presetRegion->LoopStart;
-                        znSD.endLoop = presetRegion->LoopEnd;
+                        import_support::importZoneLoop(*zn, ctx, 0,
+                                                       {
+                                                           .startSamples = presetRegion->LoopStart,
+                                                           .endSamples = presetRegion->LoopEnd,
+                                                           .active = true,
+                                                       });
                     }
 
-                    auto pan = region->GetPan(presetRegion);
-                    if (pan != 0)
-                    {
-                        if (pan < 0)
-                            pan = pan / 64.0;
-                        else
-                            pan = pan / 63.0;
-                        zn->outputInfo.pan = pan;
-                    }
+                    if (auto pan = region->GetPan(presetRegion); pan != 0)
+                        zn->outputInfo.pan = import_support::sf2NormalizedPan(pan);
 
-                    int currentModRow{0};
-                    // SCLOG_IF(sampleCompoundParsers,"Unimplemented SF2 Features Follow: " )
                     auto me2p = region->GetModEnvToPitch(presetRegion);
-                    if (me2p != 0)
-                    {
-                        zn->routingTable.routes[currentModRow].source =
-                            voice::modulation::MatrixEndpoints::Sources::eg2A;
-                        zn->routingTable.routes[currentModRow].target =
-                            voice::modulation::MatrixEndpoints::MappingTarget::pitchOffsetA;
-                        zn->routingTable.routes[currentModRow].depth = 1.0 * me2p / 19200;
-                        zn->onRoutingChanged();
-                        currentModRow++;
-                    }
-                    bool makeFilter{false};
                     auto me2f = region->GetModEnvToFilterFc(presetRegion);
-                    if (me2f != 0)
-                    {
-                        zn->routingTable.routes[currentModRow].source =
-                            voice::modulation::MatrixEndpoints::Sources::eg2A;
-                        zn->routingTable.routes[currentModRow].target =
-                            voice::modulation::MatrixEndpoints::ProcessorTarget::floatParam(0, 0);
-                        zn->routingTable.routes[currentModRow].depth =
-                            1.0 * me2f / 100 / 130; // cents, and range -60->70
-                        zn->onRoutingChanged();
-                        makeFilter = true;
-                    }
+                    auto v2p = region->GetVibLfoToPitch(presetRegion);
 
                     /*
                      * The SF2 spec says anything above 20khz is a flat response
@@ -243,24 +195,32 @@ bool importSF2(const fs::path &p, engine::Engine &e, int preset)
                      */
                     auto fc = region->GetInitialFilterFc(presetRegion);
                     auto fq = region->GetInitialFilterQ(presetRegion);
+                    bool makeFilter = (me2f != 0);
+                    import_support::FilterHandle filterHandle;
                     if (fc >= 0 && fc < 134 * 100 || makeFilter)
                     {
                         // This only runs with audio thread stopped
-                        e.getMessageController()->threadingChecker.bypassThreadChecks = true;
-                        zn->setProcessorType(0, dsp::processor::ProcessorType::proct_CytomicSVF);
-                        zn->processorStorage[0].floatParams[0] = (fc / 100.0) - 69.0;
-                        zn->processorStorage[0].floatParams[2] = std::clamp((fq / 100.0), 0., 1.);
-                        e.getMessageController()->threadingChecker.bypassThreadChecks = false;
+                        filterHandle = import_support::importZoneFilter(
+                            *zn, ctx, 0,
+                            {
+                                .type = dsp::processor::ProcessorType::proct_CytomicSVF,
+                                .cutoff = (float)((fc / 100.0) - 69.0),
+                                .resonance = (float)std::clamp((fq / 100.0), 0., 1.),
+                            });
                     }
 
-                    auto v2p = region->GetVibLfoToPitch(presetRegion);
+                    import_support::LFOHandle vibLfoHandle;
                     if (v2p > 0)
                     {
                         // Use LFO1 as the vibrato LFO
-                        zn->modulatorStorage[0].modulatorShape =
-                            modulation::ModulatorStorage::LFO_SINE;
-                        zn->modulatorStorage[0].rate =
-                            (region->GetFreqVibLfo(presetRegion) + 3637.63165623) * 0.01 / 12.0;
+                        vibLfoHandle = import_support::importZoneLFO(
+                            *zn, ctx, 0,
+                            {
+                                .shape = modulation::ModulatorStorage::LFO_SINE,
+                                .rate =
+                                    (float)((region->GetFreqVibLfo(presetRegion) + 3637.63165623) *
+                                            0.01 / 12.0),
+                            });
 
                         if (region->GetDelayVibLfo() > -11999)
                         {
@@ -270,14 +230,38 @@ bool importSF2(const fs::path &p, engine::Engine &e, int preset)
                             // zn->modulatorStorage[0].curveLfoStorage.attack = 0.0;
                             // zn->modulatorStorage[0].curveLfoStorage.release = 1.0;
                         }
+                    }
 
-                        // TODO: Fix this with a constant
-                        zn->routingTable.routes[currentModRow].source = {'znlf', 'outp', 0};
-                        zn->routingTable.routes[currentModRow].target =
-                            voice::modulation::MatrixEndpoints::MappingTarget::pitchOffsetA;
-                        zn->routingTable.routes[currentModRow].depth = 1.0 * v2p / 19200;
-                        zn->onRoutingChanged();
-                        currentModRow++;
+                    if (me2p != 0)
+                    {
+                        import_support::addImportedModRoute(
+                            *zn, ctx,
+                            {
+                                .source = import_support::ImportedSource::fromEG(egModHandle),
+                                .target = import_support::ImportedTarget::pitch(),
+                                .depth = (float)(1.0 * me2p / 19200),
+                            });
+                    }
+                    if (me2f != 0)
+                    {
+                        import_support::addImportedModRoute(
+                            *zn, ctx,
+                            {
+                                .source = import_support::ImportedSource::fromEG(egModHandle),
+                                .target = import_support::ImportedTarget::filter(
+                                    filterHandle, import_support::FilterParam::Cutoff),
+                                .depth = (float)(1.0 * me2f / 100 / 130),
+                            });
+                    }
+                    if (v2p > 0)
+                    {
+                        import_support::addImportedModRoute(
+                            *zn, ctx,
+                            {
+                                .source = import_support::ImportedSource::fromLFO(vibLfoHandle),
+                                .target = import_support::ImportedTarget::pitch(),
+                                .depth = (float)(1.0 * v2p / 19200),
+                            });
                     }
 
                     if (region->modulators.size() > 0)
@@ -316,27 +300,23 @@ bool importSF2(const fs::path &p, engine::Engine &e, int preset)
                                                             << region->exclusiveClass << " in "
                                                             << instr->GetName() << " region " << i);
 
-                    grp->addZone(zn);
+                    ctx.addZoneToGroup(grpnum, std::move(zn));
                 }
             }
         }
-        e.getSelectionManager()->applySelectActions(
-            {pt, firstGroup, firstGroup >= 0 ? 0 : -1, true, true, true});
     }
-    catch (RIFF::Exception e)
+    catch (RIFF::Exception ex)
     {
-        RAISE_ERROR_CONT(*messageController, "SF2 Load Error", e.Message);
-        return false;
+        return ctx.fail("SF2 Load Error", ex.Message);
     }
-    catch (const SCXTError &e)
+    catch (const SCXTError &ex)
     {
-        RAISE_ERROR_CONT(*messageController, "SF2 Load Error", e.what());
-        return false;
+        return ctx.fail("SF2 Load Error", ex.what());
     }
     catch (...)
     {
         return false;
     }
-    return true;
+    return ctx.finish();
 }
 } // namespace scxt::sf2_support
