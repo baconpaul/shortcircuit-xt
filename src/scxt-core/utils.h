@@ -270,6 +270,20 @@ struct ThreadingChecker
         return {};
 #endif
     }
+
+    // RAII guard for the bypassThreadChecks flag; restores on scope exit.
+    struct BypassGuard
+    {
+        ThreadingChecker &checker;
+        explicit BypassGuard(ThreadingChecker &c) : checker(c)
+        {
+            checker.bypassThreadChecks = true;
+        }
+        ~BypassGuard() { checker.bypassThreadChecks = false; }
+        BypassGuard(const BypassGuard &) = delete;
+        BypassGuard &operator=(const BypassGuard &) = delete;
+    };
+    [[nodiscard]] BypassGuard bypassChecksInScope() { return BypassGuard(*this); }
 };
 
 void postToLog(const std::string &s);

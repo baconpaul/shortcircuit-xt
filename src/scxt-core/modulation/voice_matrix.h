@@ -251,7 +251,30 @@ struct MatrixEndpoints
     {
         static_assert(scxt::egsPerZone == 5, "Clean up the egSources constructor if this fails");
         // so we can reach them from external multisamples
+        static constexpr SR eg1A{'zneg', 'aeg ', 0};
         static constexpr SR eg2A{'zneg', 'eg2 ', 0};
+        static constexpr SR eg3A{'zneg', 'eg3 ', 0};
+        static constexpr SR eg4A{'zneg', 'eg4 ', 0};
+        static constexpr SR eg5A{'zneg', 'eg5 ', 0};
+        static constexpr SR egSource(int slot)
+        {
+            switch (slot)
+            {
+            case 0:
+                return eg1A;
+            case 1:
+                return eg2A;
+            case 2:
+                return eg3A;
+            case 3:
+                return eg4A;
+            case 4:
+                return eg5A;
+            default:
+                return SR{};
+            }
+        }
+        static constexpr SR lfoSource(int slot) { return SR{'znlf', 'outp', (uint32_t)slot}; }
         Sources(engine::Engine *e);
 
         scxt::modulation::shared::LFOSourceBase<SR, 'znlf', lfosPerZone, registerVoiceModSource>

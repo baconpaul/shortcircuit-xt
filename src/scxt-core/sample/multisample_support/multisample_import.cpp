@@ -28,6 +28,9 @@
 #include <map>
 
 #include "multisample_import.h"
+#include "sample/import_support/import_harness.h"
+#include "sample/import_support/import_mapping.h"
+#include "sample/import_support/import_loop.h"
 #include "tinyxml/tinyxml.h"
 
 #include <miniz.h>
@@ -39,11 +42,8 @@ namespace scxt::multisample_support
 
 bool importMultisample(const fs::path &p, engine::Engine &engine)
 {
-    auto &messageController = engine.getMessageController();
-    assert(messageController->threadingChecker.isSerialThread());
-
-    auto cng = messaging::MessageController::ClientActivityNotificationGuard(
-        "Loading Multisample '" + p.filename().u8string() + "'", *(messageController));
+    import_support::ImporterContext ctx(engine,
+                                        "Loading Multisample '" + p.filename().u8string() + "'");
 
     mz_zip_archive zip_archive;
     memset(&zip_archive, 0, sizeof(zip_archive));
@@ -73,11 +73,7 @@ bool importMultisample(const fs::path &p, engine::Engine &engine)
 
     // Step two grab the multisample.xml
     if (fileToIndex.find("multisample.xml") == fileToIndex.end())
-    {
-        SCLOG_IF(sampleCompoundParsers, "No Multisapmle.xml");
-        RAISE_ERROR_ENGINE(engine, "Multisample Error", "Mo XML file in Multisample");
-        return false;
-    }
+        return ctx.fail("Multisample Error", "No XML file in Multisample");
 
     size_t rsize{0};
     auto data =
@@ -85,32 +81,23 @@ bool importMultisample(const fs::path &p, engine::Engine &engine)
     std::string xml((const char *)data, rsize);
     free(data);
 
-    // SCLOG_IF(sampleCompoundParsers,xml);
     auto doc = TiXmlDocument();
     if (!doc.Parse(xml.c_str()))
     {
-        SCLOG_IF(sampleCompoundParsers, "XML Parse Fail");
         mz_zip_reader_end(&zip_archive);
-
-        RAISE_ERROR_ENGINE(engine, "Multisample Error", "XML Failed to parse");
-        return false;
+        return ctx.fail("Multisample Error", "XML Failed to parse");
     }
-
-    auto pt = std::clamp(engine.getSelectionManager()->selectedPart, (int16_t)0, (int16_t)numParts);
-    auto &part = engine.getPatch()->getPart(pt);
-
-    std::vector<int> addedGroupIndices;
 
     auto rt = doc.RootElement();
     if (rt->ValueStr() != "multisample")
     {
-        SCLOG_IF(sampleCompoundParsers, "XML is not a multisample document");
         mz_zip_reader_end(&zip_archive);
-        RAISE_ERROR_ENGINE(engine, "Multisample Error", "XML invalid");
-        return false;
+        return ctx.fail("Multisample Error", "XML invalid");
     }
 
-    auto addSampleFromElement = [&p, &part, &engine, &zip_archive, &fileToIndex, &addedGroupIndices,
+    std::vector<int> addedGroupIndices;
+
+    auto addSampleFromElement = [&p, &ctx, &engine, &zip_archive, &fileToIndex, &addedGroupIndices,
                                  &md5](TiXmlElement *fc, int32_t group_index = -1) {
         /*
          * <sample file="60 Clavinet E5 05.wav" gain="-0.96" group="4" parameter-1="0.0000"
@@ -121,11 +108,7 @@ bool importMultisample(const fs::path &p, engine::Engine &engine)
     </sample>
          */
         if (!fc->Attribute("file"))
-        {
-            SCLOG_IF(sampleCompoundParsers, "Sample is not a file");
-            RAISE_ERROR_ENGINE(engine, "Multisample Error", "Sample is not a file");
-            return false;
-        }
+            return ctx.fail("Multisample Error", "Sample is not a file");
 
         size_t ssize{0};
         auto data = mz_zip_reader_extract_to_heap(&zip_archive, fileToIndex[fc->Attribute("file")],
@@ -190,13 +173,13 @@ bool importMultisample(const fs::path &p, engine::Engine &engine)
             }
         }
 
-        auto group_id = 0;
+        auto group_id = group_index;
         if (group_index == -1)
         {
             auto group{0};
             fc->QueryIntAttribute("group", &group);
 
-            if (group < 0 || group > addedGroupIndices.size())
+            if (group < 0 || group > (int)addedGroupIndices.size())
             {
                 SCLOG_IF(sampleCompoundParsers, "Bad group : " << group);
                 return false;
@@ -204,30 +187,35 @@ bool importMultisample(const fs::path &p, engine::Engine &engine)
             group_id = addedGroupIndices[group];
         }
 
-        auto &g = part->getGroup(group_id);
         auto z = std::make_unique<engine::Zone>(*lsid);
         z->givenName = fc->Attribute("file");
-        z->mapping.rootKey = kr;
-        z->mapping.keyboardRange.keyStart = ks;
-        z->mapping.keyboardRange.keyEnd = ke;
-        z->mapping.keyboardRange.fadeStart = klf;
-        z->mapping.keyboardRange.fadeEnd = khf;
-        z->mapping.velocityRange.velStart = vs;
-        z->mapping.velocityRange.velEnd = ve;
-        z->mapping.velocityRange.fadeStart = vlf;
-        z->mapping.velocityRange.fadeEnd = vhf;
-        z->mapping.tracking = ktrack;
-        z->mapping.pitchOffset = ktune;
+        import_support::importZoneMapping(*z, ctx,
+                                          {
+                                              .rootKey = kr,
+                                              .keyStart = ks,
+                                              .keyEnd = ke,
+                                              .keyFadeStart = klf,
+                                              .keyFadeEnd = khf,
+                                              .velStart = vs,
+                                              .velEnd = ve,
+                                              .velFadeStart = vlf,
+                                              .velFadeEnd = vhf,
+                                              .tracking = ktrack,
+                                              .pitchOffsetSemitones = ktune,
+                                          });
 
         z->attachToSample(*engine.getSampleManager());
         if (loopOn && loopStart + loopEnd > 0)
         {
-            z->variantData.variants[0].loopActive = true;
-            z->variantData.variants[0].loopMode = engine::Zone::LoopMode::LOOP_WHILE_GATED;
-            z->variantData.variants[0].startLoop = loopStart;
-            z->variantData.variants[0].endLoop = loopEnd;
+            import_support::importZoneLoop(*z, ctx, 0,
+                                           {
+                                               .mode = engine::Zone::LoopMode::LOOP_WHILE_GATED,
+                                               .startSamples = (int64_t)loopStart,
+                                               .endSamples = (int64_t)loopEnd,
+                                               .active = true,
+                                           });
         }
-        g->addZone(z);
+        ctx.addZoneToGroup(group_id, std::move(z));
 
         return true;
     };
@@ -244,32 +232,22 @@ bool importMultisample(const fs::path &p, engine::Engine &engine)
         auto eln = fc->ValueStr();
         if (eln == "group")
         {
-            auto groupId = part->addGroup() - 1;
-            auto &group = part->getGroup(groupId);
-
-            if (fc->Attribute("name"))
-            {
-                group->name = name + fc->Attribute("name");
-            }
-            addedGroupIndices.push_back(groupId);
+            auto groupName = fc->Attribute("name") ? (name + fc->Attribute("name")) : "";
+            addedGroupIndices.push_back(ctx.addGroup(groupName));
         }
         else if (eln == "sample")
         {
             if (!addSampleFromElement(fc))
             {
+                mz_zip_reader_end(&zip_archive);
                 return false;
             }
         }
         else if (eln == "layer")
         {
             // Sigh. Presonus does something a little different
-            auto groupId = part->addGroup() - 1;
-            auto &group = part->getGroup(groupId);
-
-            if (fc->Attribute("name"))
-            {
-                group->name = name + fc->Attribute("name");
-            }
+            auto groupName = fc->Attribute("name") ? (name + fc->Attribute("name")) : "";
+            auto groupId = ctx.addGroup(groupName);
             addedGroupIndices.push_back(groupId);
 
             auto smp = fc->FirstChildElement("sample");
@@ -281,23 +259,12 @@ bool importMultisample(const fs::path &p, engine::Engine &engine)
         }
         else
         {
-            SCLOG_IF(sampleCompoundParsers, "Ignored multisample field " << eln);
+            ctx.unsupported("multisample field", eln);
         }
         fc = fc->NextSiblingElement();
     }
 
     mz_zip_reader_end(&zip_archive);
-
-    if (!addedGroupIndices.empty())
-    {
-        engine.getSelectionManager()->applySelectActions(
-            selection::SelectionManager::SelectActionContents(pt, addedGroupIndices.front(), 0,
-                                                              true, true, true));
-        return true;
-    }
-    else
-    {
-        return false;
-    }
+    return ctx.finish();
 }
 } // namespace scxt::multisample_support

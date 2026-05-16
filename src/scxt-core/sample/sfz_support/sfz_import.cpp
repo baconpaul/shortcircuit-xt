@@ -26,6 +26,11 @@
  */
 
 #include "sfz_import.h"
+#include "sample/import_support/import_harness.h"
+#include "sample/import_support/import_mapping.h"
+#include "sample/import_support/import_envelope.h"
+#include "sample/import_support/import_loop.h"
+#include "sample/import_support/import_numeric.h"
 #include "selection/selection_manager.h"
 #include "sfz_parse.h"
 #include "messaging/messaging.h"
@@ -197,8 +202,7 @@ void zonePlayback(std::unique_ptr<engine::Zone> &zn, opCodeMap_t &opCodes)
 
     if (auto v = consumeOpcode(opCodes, "tune"); v.has_value())
     {
-        // Tune is supplied in cents. Our pitch offset is in semitones
-        mp.pitchOffset = std::atof(v->c_str()) * 0.01;
+        mp.pitchOffset = import_support::centsToSemitones((float)std::atof(v->c_str()));
     }
 
     if (auto v = consumeOpcode(opCodes, "transpose"); v.has_value())
@@ -207,18 +211,22 @@ void zonePlayback(std::unique_ptr<engine::Zone> &zn, opCodeMap_t &opCodes)
     }
 }
 
-void zoneLoop(std::unique_ptr<engine::Zone> &zn, opCodeMap_t &opCodes, int &loadInfo,
-              int64_t &loop_start, int64_t &loop_end)
+// Parse SFZ loop_* opcodes into LoopArgs. Side-effect: masks engine::Zone::LOOP
+// out of loadInfo if explicit bounds were given (so the later attach call won't
+// overwrite them from sample meta).
+import_support::LoopArgs zoneLoopParse(opCodeMap_t &opCodes, int &loadInfo)
 {
+    import_support::LoopArgs args;
+
     if (auto v = consumeOpcode(opCodes, "loop_start"); v.has_value())
     {
-        loop_start = std::atol(v->c_str());
+        args.startSamples = std::atol(v->c_str());
         loadInfo = loadInfo & ~engine::Zone::LOOP;
     }
 
     if (auto v = consumeOpcode(opCodes, "loop_end"); v.has_value())
     {
-        loop_end = std::atol(v->c_str());
+        args.endSamples = std::atol(v->c_str());
         loadInfo = loadInfo & ~engine::Zone::LOOP;
     }
 
@@ -226,69 +234,63 @@ void zoneLoop(std::unique_ptr<engine::Zone> &zn, opCodeMap_t &opCodes, int &load
     {
         if (*v == "loop_continuous")
         {
-            // FIXME: In round robin looping modes this is probably wrong
-            zn->variantData.variants[0].loopActive = true;
-            zn->variantData.variants[0].loopMode = engine::Zone::LOOP_DURING_VOICE;
+            args.active = true;
+            args.mode = engine::Zone::LOOP_DURING_VOICE;
         }
         else
         {
             SCLOG_IF(sampleCompoundParsers, "SFZ Unsupported loop_mode : " << *v);
         }
     }
+
+    return args;
 }
 
-void zoneEnvelope(std::unique_ptr<engine::Zone> &zn, opCodeMap_t &opCodes, int slot,
-                  const std::string &prefix)
+void zoneEnvelope(std::unique_ptr<engine::Zone> &zn, import_support::ImporterContext &ctx,
+                  opCodeMap_t &opCodes, int slot, const std::string &prefix)
 {
-    auto &eg = zn->egStorage[slot];
+    import_support::EnvelopeArgs args;
 
     if (auto v = consumeOpcode(opCodes, prefix + "_sustain"); v.has_value())
-        eg.s = std::atof(v->c_str()) * 0.01;
+        args.sustainLevel = (float)(std::atof(v->c_str()) * 0.01);
 
     if (auto v = consumeOpcode(opCodes, prefix + "_delay"); v.has_value())
-        eg.dly = scxt::modulation::secondsToNormalizedEnvTime(std::atof(v->c_str()));
+        args.delaySeconds = (float)std::atof(v->c_str());
 
     if (auto v = consumeOpcode(opCodes, prefix + "_attack"); v.has_value())
-        eg.a = scxt::modulation::secondsToNormalizedEnvTime(std::atof(v->c_str()));
+        args.attackSeconds = (float)std::atof(v->c_str());
 
     if (auto v = consumeOpcode(opCodes, prefix + "_decay"); v.has_value())
     {
-        eg.d = scxt::modulation::secondsToNormalizedEnvTime(std::atof(v->c_str()));
-        eg.dShape = -1;
+        args.decaySeconds = (float)std::atof(v->c_str());
+        args.decayShape = -1.f;
     }
 
     if (auto v = consumeOpcode(opCodes, prefix + "_hold"); v.has_value())
-        eg.h = scxt::modulation::secondsToNormalizedEnvTime(std::atof(v->c_str()));
+        args.holdSeconds = (float)std::atof(v->c_str());
 
     if (auto v = consumeOpcode(opCodes, prefix + "_release"); v.has_value())
     {
-        eg.r = scxt::modulation::secondsToNormalizedEnvTime(std::atof(v->c_str()));
-        eg.rShape = -1;
+        args.releaseSeconds = (float)std::atof(v->c_str());
+        args.releaseShape = -1.f;
     }
+
+    import_support::importZoneEnvelope(*zn, ctx, slot, args);
 }
 
 bool importSFZ(const fs::path &f, engine::Engine &e)
 {
     int octaveOffset{0};
-    auto &messageController = e.getMessageController();
-    assert(messageController->threadingChecker.isSerialThread());
-
-    auto cng = messaging::MessageController::ClientActivityNotificationGuard(
-        "Loading SFZ '" + f.filename().u8string() + "'", *(messageController));
+    import_support::ImporterContext ctx(e, "Loading SFZ '" + f.filename().u8string() + "'");
 
     SFZParser parser;
-    parser.onError = [&e](const auto &s) { RAISE_ERROR_ENGINE(e, "SFZ Import Error", s); };
+    parser.onError = [&ctx](const auto &s) { ctx.raise("SFZ Import Error", s); };
 
     auto doc = parser.parse(f);
     auto rootDir = f.parent_path();
     auto sampleDir = rootDir;
 
-    auto pt = std::clamp(e.getSelectionManager()->selectedPart, (int16_t)0, (int16_t)numParts);
-
-    auto &part = e.getPatch()->getPart(pt);
-
     int groupId = -1;
-    int firstGroupWithZonesAdded = -1;
     int regionCount{0};
     SFZParser::opCodes_t currentGroupOpcodes;
     std::set<std::string> unusedZoneOpcodes;
@@ -303,9 +305,9 @@ bool importSFZ(const fs::path &f, engine::Engine &e)
         {
         case SFZParser::Header::group:
         {
-            groupId = part->addGroup() - 1;
+            groupId = ctx.addGroup();
             currentGroupOpcodes = list;
-            auto &group = part->getGroup(groupId);
+            auto &group = ctx.getPart().getGroup(groupId);
             for (auto &oc : list)
             {
                 if (oc.name == "group_label" || oc.name == "name")
@@ -315,8 +317,6 @@ bool importSFZ(const fs::path &f, engine::Engine &e)
                 else
                 {
                     // We take a second shot at this below
-                    // SCLOG_IF(sampleCompoundParsers,"     Skipped OpCode <group>: " << oc.name <<
-                    // " -> " << oc.value);
                 }
             }
         }
@@ -325,10 +325,8 @@ bool importSFZ(const fs::path &f, engine::Engine &e)
         {
             regionCount++;
             if (groupId < 0)
-            {
-                groupId = part->addGroup() - 1;
-            }
-            auto &group = part->getGroup(groupId);
+                groupId = ctx.addGroup();
+            auto &group = ctx.getPart().getGroup(groupId);
 
             // Find the sample
             std::string sampleFileString = "<-->";
@@ -350,11 +348,9 @@ bool importSFZ(const fs::path &f, engine::Engine &e)
             if (!scxt::isValidUtf(sampleFileString))
             {
                 SCLOG_IF(warnings, "Original file name is `" << sampleFileString << "`");
-                RAISE_ERROR_ENGINE(e, "SFZ Import Error",
-                                   "Sample filename in region " + std::to_string(regionCount) +
-                                       " contains invalid UTF-8 sequence. "
-                                       "Stopping SFZ import");
-                return false;
+                return ctx.fail("SFZ Import Error",
+                                "Sample filename in region " + std::to_string(regionCount) +
+                                    " contains invalid UTF-8 sequence. Stopping SFZ import");
             }
 
             // fs always works with / and on windows also works with back. Quotes are
@@ -373,10 +369,8 @@ bool importSFZ(const fs::path &f, engine::Engine &e)
                 }
                 else
                 {
-                    SCLOG_IF(sampleCompoundParsers,
-                             "Cannot load Sample : " << samplePath.u8string());
-                    RAISE_ERROR_ENGINE(e, "SFZ Import Error",
-                                       "Cannot load sample '" + samplePath.u8string() + "'");
+                    ctx.raise("SFZ Import Error",
+                              "Cannot load sample '" + samplePath.u8string() + "'");
                     break;
                 }
             }
@@ -389,21 +383,15 @@ bool importSFZ(const fs::path &f, engine::Engine &e)
                 }
                 else
                 {
-                    SCLOG_IF(sampleCompoundParsers, "Cannot load Sample : " << sampleFile);
-                    RAISE_ERROR_ENGINE(e, "SFZ Import Error",
-                                       "Cannot load sample '" + sampleFile.u8string() + "'");
-                    return false;
+                    return ctx.fail("SFZ Import Error",
+                                    "Cannot load sample '" + sampleFile.u8string() + "'");
                 }
             }
             else
             {
-                SCLOG_IF(sampleCompoundParsers, "Unable to load either '"
-                                                    << samplePath.u8string() << "' or '"
-                                                    << sampleFile.u8string() << "'");
-                RAISE_ERROR_ENGINE(e, "SFZ Import Error",
-                                   "Unable to load either '" + samplePath.u8string() + "' or '" +
-                                       sampleFile.u8string() + "'");
-                return false;
+                return ctx.fail("SFZ Import Error", "Unable to load either '" +
+                                                        samplePath.u8string() + "' or '" +
+                                                        sampleFile.u8string() + "'");
             }
 
             // OK so do we have a sequence position > 1
@@ -420,16 +408,17 @@ bool importSFZ(const fs::path &f, engine::Engine &e)
                 }
             }
             auto zn = std::make_unique<engine::Zone>(sid);
-            // SFZ defaults
-            zn->mapping.rootKey = 60;
-            zn->mapping.keyboardRange.keyStart = 0;
-            zn->mapping.keyboardRange.keyEnd = 127;
-            zn->mapping.velocityRange.velStart = 0;
-            zn->mapping.velocityRange.velEnd = 127;
+            // SFZ default mapping (gets overwritten by zoneGeometry once opcodes are parsed).
+            import_support::importZoneMapping(*zn, ctx,
+                                              {
+                                                  .rootKey = 60,
+                                                  .keyStart = 0,
+                                                  .keyEnd = 127,
+                                                  .velStart = 0,
+                                                  .velEnd = 127,
+                                              });
 
             auto loadInfo = engine::Zone::LOOP | engine::Zone::ENDPOINTS | engine::Zone::MAPPING;
-
-            int64_t loop_start{-1}, loop_end{-1};
 
             opCodeMap_t mergedOpcodes;
             for (const auto &oc : currentGroupOpcodes)
@@ -441,14 +430,14 @@ bool importSFZ(const fs::path &f, engine::Engine &e)
             consumeOpcode(mergedOpcodes, "sample");
             consumeOpcode(mergedOpcodes, "seq_position");
 
-            auto onError = [&e](const std::string &title, const std::string &msg) {
-                RAISE_ERROR_ENGINE(e, title, msg);
+            auto onError = [&ctx](const std::string &title, const std::string &msg) {
+                ctx.raise(title, msg);
             };
             zoneGeometry(zn, mergedOpcodes, loadInfo, onError, octaveOffset);
             zonePlayback(zn, mergedOpcodes);
-            zoneLoop(zn, mergedOpcodes, loadInfo, loop_start, loop_end);
-            zoneEnvelope(zn, mergedOpcodes, 0, "ampeg");
-            zoneEnvelope(zn, mergedOpcodes, 1, "fileg");
+            auto loopArgs = zoneLoopParse(mergedOpcodes, loadInfo);
+            zoneEnvelope(zn, ctx, mergedOpcodes, 0, "ampeg");
+            zoneEnvelope(zn, ctx, mergedOpcodes, 1, "fileg");
 
             for (auto &[n, m] : mergedOpcodes)
             {
@@ -476,9 +465,9 @@ bool importSFZ(const fs::path &f, engine::Engine &e)
                 }
                 if (!attached)
                 {
-                    RAISE_ERROR_ENGINE(e, "Mis-mapped SFZ Round Robin",
-                                       std::string("Unable to locate zone for sample ") +
-                                           sampleFile.u8string());
+                    ctx.raise("Mis-mapped SFZ Round Robin",
+                              std::string("Unable to locate zone for sample ") +
+                                  sampleFile.u8string());
                 }
             }
             else
@@ -489,23 +478,21 @@ bool importSFZ(const fs::path &f, engine::Engine &e)
 
             if (variantIndex >= 0)
             {
-                if (loop_start >= 0 || loop_end >= 0)
+                // Apply SFZ's clamp/swap normalization to whatever bounds were
+                // gathered before handing them to importZoneLoop.
+                if (loopArgs.startSamples || loopArgs.endSamples)
                 {
-                    zn->variantData.variants[variantIndex].startLoop =
-                        std::max((int64_t)0, loop_start);
-                    zn->variantData.variants[variantIndex].endLoop =
-                        std::max({(int64_t)0, loop_start + 1, loop_end});
+                    int64_t ls = loopArgs.startSamples.value_or(-1);
+                    int64_t le = loopArgs.endSamples.value_or(-1);
+                    loopArgs.startSamples = std::max((int64_t)0, ls);
+                    loopArgs.endSamples = std::max({(int64_t)0, ls + 1, le});
                 }
+                import_support::importZoneLoop(*zn, ctx, variantIndex, loopArgs);
             }
 
             if (roundRobinPosition <= 0)
             {
-                group->addZone(zn);
-            }
-
-            if (firstGroupWithZonesAdded == -1)
-            {
-                firstGroupWithZonesAdded = groupId;
+                ctx.addZoneToGroup(groupId, std::move(zn));
             }
         }
         break;
@@ -545,20 +532,9 @@ bool importSFZ(const fs::path &f, engine::Engine &e)
         break;
         }
     }
-    if (!unusedZoneOpcodes.empty())
-    {
-        std::ostringstream oss;
-        std::string pfx = "";
-        for (auto &oc : unusedZoneOpcodes)
-        {
-            oss << pfx << oc;
-            pfx = ", ";
-        }
-        SCLOG_IF(sampleCompoundParsers || scxt::log::debug, "Unused SFZ OpCodes : " << oss.str())
-    }
+    for (auto &oc : unusedZoneOpcodes)
+        ctx.unsupported("SFZ opcode", oc);
 
-    e.getSelectionManager()->applySelectActions(selection::SelectionManager::SelectActionContents(
-        pt, firstGroupWithZonesAdded, 0, true, true, true));
-    return true;
+    return ctx.finish();
 }
 } // namespace scxt::sfz_support

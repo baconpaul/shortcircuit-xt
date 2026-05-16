@@ -47,9 +47,6 @@
  * generous (50 steps) because compound importers go through
  * stopAudioThreadThenRunOnSerial which has to suspend and restart the
  * audio thread.
- *
- * Multisample is intentionally omitted — we don't currently have a
- * checked-in fixture for it. Add one and a TEST_CASE here when ready.
  */
 
 namespace cmsg = scxt::messaging::client;
@@ -95,12 +92,15 @@ TEST_CASE("Import SFZ fixture", "[importer]")
     f.loadSample(p);
 
     auto &part = f.part0();
-    REQUIRE(part.getGroups().size() >= 1);
+    // One <group> header in the SFZ file, five <region> headers under it.
+    REQUIRE(part.getGroups().size() == 1);
+    auto &group = part.getGroups()[0];
+    REQUIRE(group->getZones().size() == 5);
 
-    int totalZones = 0;
-    for (auto &g : part.getGroups())
-        totalZones += (int)g->getZones().size();
-    REQUIRE(totalZones >= 1);
+    // Group-level ampeg_sustain=53 applies to all regions via merged opcodes;
+    // the helper converts percent → 0..1 level.
+    for (auto &z : group->getZones())
+        CHECK(z->egStorage[0].s == Approx(0.53f));
 }
 
 TEST_CASE("Import SF2 fixture", "[importer]")
@@ -119,6 +119,16 @@ TEST_CASE("Import SF2 fixture", "[importer]")
     for (auto &g : part.getGroups())
         totalZones += (int)g->getZones().size();
     REQUIRE(totalZones >= 1);
+
+    // At least one zone should have rootKey set to something other than the
+    // Zone default of 60 — verifies the SF2 importer wrote the rootKey field
+    // (catches the kind of `60 + ... - 60` regression we just cleaned up).
+    bool anyNonDefaultRoot = false;
+    for (auto &g : part.getGroups())
+        for (auto &z : g->getZones())
+            if (z->mapping.rootKey != 60)
+                anyNonDefaultRoot = true;
+    CHECK(anyNonDefaultRoot);
 }
 
 TEST_CASE("Import AKAI fixture", "[importer]")
@@ -137,4 +147,43 @@ TEST_CASE("Import AKAI fixture", "[importer]")
     for (auto &g : part.getGroups())
         totalZones += (int)g->getZones().size();
     REQUIRE(totalZones >= 1);
+
+    // At least one zone has a non-default keyboard range — verifies that the
+    // AKAI importer reaches `importZoneMapping` and populates the range.
+    bool anyMappedRange = false;
+    for (auto &g : part.getGroups())
+        for (auto &z : g->getZones())
+            if (z->mapping.keyboardRange.keyEnd > 0)
+                anyMappedRange = true;
+    CHECK(anyMappedRange);
+}
+
+TEST_CASE("Import multisample fixture", "[importer]")
+{
+    auto p = fixturePath("scxt_test.multisample");
+    INFO("fixture=" << p.string());
+    REQUIRE(fs::exists(p));
+
+    ImporterFixture f;
+    f.loadSample(p);
+
+    auto &part = f.part0();
+    REQUIRE(part.getGroups().size() == 1);
+
+    auto &group = part.getGroups()[0];
+    REQUIRE(group->getZones().size() == 2);
+
+    auto &z0 = group->getZones()[0];
+    CHECK(z0->mapping.rootKey == 34);
+    CHECK(z0->mapping.keyboardRange.keyStart == 33);
+    CHECK(z0->mapping.keyboardRange.keyEnd == 35);
+    CHECK(z0->mapping.velocityRange.velStart == 0);
+    CHECK(z0->mapping.velocityRange.velEnd == 39);
+
+    auto &z1 = group->getZones()[1];
+    CHECK(z1->mapping.rootKey == 37);
+    CHECK(z1->mapping.keyboardRange.keyStart == 36);
+    CHECK(z1->mapping.keyboardRange.keyEnd == 58);
+    CHECK(z1->mapping.velocityRange.velStart == 0);
+    CHECK(z1->mapping.velocityRange.velEnd == 39);
 }

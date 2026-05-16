@@ -31,6 +31,8 @@
 #include <cstdint>
 #include "utils.h"
 #include "exs_import.h"
+#include "sample/import_support/import_harness.h"
+#include "sample/import_support/import_mapping.h"
 
 #include <messaging/messaging.h>
 
@@ -670,15 +672,9 @@ std::optional<scxt::SampleID> loadSampleFromEXS(const fs::path &p, int sampleInd
 
 bool importEXS(const fs::path &p, engine::Engine &e)
 {
-    auto &messageController = e.getMessageController();
-    assert(messageController->threadingChecker.isSerialThread());
-
-    auto cng = messaging::MessageController::ClientActivityNotificationGuard(
-        "Loading EXS '" + p.filename().u8string() + "'", *(messageController));
+    import_support::ImporterContext ctx(e, "Loading EXS '" + p.filename().u8string() + "'");
 
     auto info = parseEXS(p);
-    auto pt = std::clamp(e.getSelectionManager()->selectedPart, (int16_t)0, (int16_t)numParts);
-    auto &part = e.getPatch()->getPart(pt);
 
     std::vector<int> groupIndexByOrder;
     std::vector<SampleID> sampleIDByOrder;
@@ -693,30 +689,20 @@ bool importEXS(const fs::path &p, engine::Engine &e)
         }
     }
 
-    int gidx{0};
     for (auto &g : info.groups)
-    {
-        auto groupId = part->addGroup() - 1;
-        auto &group = part->getGroup(groupId);
-        group->name = g.within.name;
-        groupIndexByOrder.push_back(groupId);
-        ++gidx;
-    }
+        groupIndexByOrder.push_back(ctx.addGroup(g.within.name));
 
-    std::vector<selection::SelectionManager::SelectActionContents> selectionActions;
-
-    int zi{0};
     for (auto &z : info.zones)
     {
         auto exsgi = z.groupIndex;
         auto exssi = z.sampleIndex;
 
-        if (exsgi < 0 || exsgi >= groupIndexByOrder.size())
+        if (exsgi < 0 || exsgi >= (int)groupIndexByOrder.size())
         {
             SCLOG_IF(sampleCompoundParsers, "Out-of-bounds group index : " << SCD(exsgi));
             continue;
         }
-        if (exssi < 0 || exssi >= sampleIDByOrder.size())
+        if (exssi < 0 || exssi >= (int)sampleIDByOrder.size())
         {
             SCLOG_IF(sampleCompoundParsers,
                      "Out-of-bounds sample index " << SCD(exsgi) << SCD(exssi));
@@ -724,28 +710,21 @@ bool importEXS(const fs::path &p, engine::Engine &e)
         }
         auto gi = groupIndexByOrder[exsgi];
         auto si = sampleIDByOrder[exssi];
-        auto &group = part->getGroup(gi);
         auto zone = std::make_unique<engine::Zone>(si);
 
-        zone->mapping.rootKey = z.key;
-        zone->mapping.keyboardRange.keyStart = z.keyLow;
-        zone->mapping.keyboardRange.keyEnd = z.keyHigh;
-        zone->mapping.velocityRange.velStart = z.velocityLow;
-        zone->mapping.velocityRange.velEnd = z.velocityHigh;
+        import_support::importZoneMapping(*zone, ctx,
+                                          {
+                                              .rootKey = z.key,
+                                              .keyStart = z.keyLow,
+                                              .keyEnd = z.keyHigh,
+                                              .velStart = z.velocityLow,
+                                              .velEnd = z.velocityHigh,
+                                          });
 
         zone->attachToSample(*(e.getSampleManager()));
-        group->addZone(std::move(zone));
-
-        selectionActions.emplace_back(pt, gi, zi++, true, false, false);
+        ctx.addZoneToGroup(gi, std::move(zone));
     }
-
-    if (!selectionActions.empty())
-    {
-        selectionActions.back().selectingAsLead = true;
-        e.getSelectionManager()->applySelectActions(selectionActions);
-    }
-
-    return true;
+    return ctx.finish();
 }
 
 void dumpEXSToLog(const fs::path &p)

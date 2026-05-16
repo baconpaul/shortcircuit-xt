@@ -402,13 +402,9 @@ MatrixEndpoints::LFOTarget::LFOTarget(engine::Engine *e, uint32_t p)
 
 MatrixEndpoints::Sources::Sources(engine::Engine *e)
     : lfoSources(e), glfoSources(e, "LFO (Group)", "GLFO"), midiCCSources(e), midiSources(e),
-      noteExpressions(e), egSources{{{'zneg', 'aeg ', 0},
-                                     eg2A,
-                                     {'zneg', 'eg3 ', 0},
-                                     {'zneg', 'eg4 ', 0},
-                                     {'zneg', 'eg5 ', 0}}},
-      transportSources(e), rngSources(e), envFollowerSources(e), macroSources(e), mpeSources(e),
-      voiceSources(e), keyAndPitchSources(e)
+      noteExpressions(e), egSources{{eg1A, eg2A, eg3A, eg4A, eg5A}}, transportSources(e),
+      rngSources(e), envFollowerSources(e), macroSources(e), mpeSources(e), voiceSources(e),
+      keyAndPitchSources(e)
 {
     registerVoiceModSource(e, egSources[0], "EG", "AEG");
     for (int i = 1; i < egsPerZone; ++i)
