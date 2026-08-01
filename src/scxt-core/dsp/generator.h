@@ -71,9 +71,24 @@ inline InterpolationTypes fromStringInterpolationTypes(const std::string &s)
     return p->second;
 }
 
+/*
+ * There are two directions here and they are not the same thing.
+ *
+ * loopDirection is what the loop logic tracks: it is seeded from playReverse at
+ * note on, flipped at ping-pong turnarounds, and is what directionAtOutset is
+ * compared against.
+ *
+ * travelDirection is loopDirection folded with the sign of ratio, which goes
+ * negative under playback-ratio modulation. It is the direction the playhead
+ * actually moves, and it is the only one the position advance and the
+ * end-of-playback tests may use. Reaching for loopDirection in that code is wrong
+ * whenever ratio is negative, which is how six termination tests ended up stalling
+ * voices instead of finishing them.
+ */
 struct GeneratorState
 {
-    int16_t direction{0}; // +1 for forward, -1 for back
+    int16_t loopDirection{0};   // +1 for forward, -1 for back. NOT the travel direction.
+    int16_t travelDirection{0}; // loopDirection * sign(ratio); derived, written per block
     int32_t samplePos{0};
     int32_t sampleSubPos{0};
 
@@ -91,7 +106,7 @@ struct GeneratorState
     int32_t sampleStop{0};
     bool gated{0};
     int16_t loopCount{-1};        // if this is positive then we play this many loops no matter what
-    int16_t directionAtOutset{1}; // is our 'ur-' direction forward or backwards?
+    int16_t directionAtOutset{1}; // the loopDirection we started with
 
     float positionWithinLoop{0};
     bool isInLoop{false};

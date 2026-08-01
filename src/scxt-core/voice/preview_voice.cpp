@@ -72,9 +72,9 @@ struct PreviewVoice::Details
         GD.loopFade = 0;
         GD.playbackLowerBound = 0;
         GD.playbackUpperBound = sample->sampleLengthPerChannel;
-        GD.direction = 1;
+        GD.loopDirection = 1;
         GD.isFinished = false;
-        GD.directionAtOutset = GD.direction;
+        GD.directionAtOutset = GD.loopDirection;
         GD.gated = true;
 
         GD.ratio = (int32_t)((double)(1 << 24) * sample->sample_rate * parent->samplerate_inv);

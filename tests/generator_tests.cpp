@@ -106,6 +106,7 @@ struct GenConfig
     int warmupBlocks{32};
     int recordBlocks{10};
     int ungateAtBlock{-1}; // relative to the start of the recorded region
+    int startPos{-1};      // -1 means the natural start for the direction
 };
 
 struct GenHarness
@@ -179,9 +180,14 @@ struct GenHarness
         gs.loopCount = -1;
         gs.interpolationType = c.interp;
         gs.samplePos = c.playReverse ? gs.playbackUpperBound : gs.playbackLowerBound;
+        if (c.startPos >= 0)
+            gs.samplePos = c.startPos;
         gs.sampleSubPos = 0;
-        gs.direction = c.playReverse ? -1 : 1;
-        gs.directionAtOutset = gs.direction;
+        gs.loopDirection = c.playReverse ? -1 : 1;
+        gs.directionAtOutset = gs.loopDirection;
+        // the generator derives this per block; seed it so a capture with no warmup
+        // does not read a zero and count a spurious turnaround on its first block
+        gs.travelDirection = gs.loopDirection * (c.ratio < 0 ? -1 : 1);
 
         fn = scxt::dsp::GetFPtrGeneratorSample(c.stereo, c.isFloat, c.loopActive, c.loopForward,
                                                c.loopWhileGated);
@@ -201,7 +207,7 @@ struct GenHarness
         // rather than from loopCount keeps this honest across all five loop modes.
         auto travelPerBlock = std::abs((double)c.ratio / (double)unityRatio) * gs.blockSize;
         auto prevPos = gs.samplePos;
-        auto prevDir = gs.direction;
+        auto prevDir = gs.travelDirection;
 
         for (int b = 0; b < c.recordBlocks; ++b)
         {
@@ -216,10 +222,11 @@ struct GenHarness
                 recR.push_back(outR[i]);
             }
 
-            if (std::abs(gs.samplePos - prevPos) > travelPerBlock + 2 || gs.direction != prevDir)
+            if (std::abs(gs.samplePos - prevPos) > travelPerBlock + 2 ||
+                gs.travelDirection != prevDir)
                 seamsInRecord++;
             prevPos = gs.samplePos;
-            prevDir = gs.direction;
+            prevDir = gs.travelDirection;
         }
     }
 };
@@ -345,6 +352,55 @@ TEST_CASE("Generator no-loop playback terminates at the bounds", "[generator]")
             INFO("sample " << i);
             REQUIRE(h.recL[i] == Approx(0.f).margin(1e-9));
         }
+    }
+}
+
+TEST_CASE("Generator terminates under a negative playback ratio", "[generator]")
+{
+    /*
+     * A negative ratio means the playhead travels opposite to loopDirection. The
+     * end-of-playback tests have to ask which way we are actually moving; asking
+     * loopDirection instead clamps the position at the bound and never finishes, so
+     * the voice hangs. Both sections run to a bound loopDirection alone would not
+     * predict.
+     */
+    SECTION("forward loop direction, negative ratio, travelling down")
+    {
+        GenConfig c;
+        c.name = "negratio-down";
+        c.loopActive = false;
+        c.ratio = -unityRatio;
+        c.startPos = 256;
+        c.warmupBlocks = 0;
+        c.recordBlocks = 24; // 384 samples for a 256 sample descent
+
+        GenHarness h(c);
+        h.run(c);
+
+        REQUIRE(h.gs.travelDirection == -1);
+        REQUIRE(h.gs.loopDirection == 1); // unchanged: the ratio sign is not the loop's business
+        REQUIRE(h.gs.samplePos == gStartSample);
+        REQUIRE(h.gs.isFinished);
+    }
+
+    SECTION("reverse loop direction, negative ratio, travelling up")
+    {
+        GenConfig c;
+        c.name = "negratio-up";
+        c.loopActive = false;
+        c.playReverse = true;
+        c.ratio = -unityRatio;
+        c.startPos = 256;
+        c.warmupBlocks = 0;
+        c.recordBlocks = 24;
+
+        GenHarness h(c);
+        h.run(c);
+
+        REQUIRE(h.gs.travelDirection == 1);
+        REQUIRE(h.gs.loopDirection == -1);
+        REQUIRE(h.gs.samplePos == gEndSample);
+        REQUIRE(h.gs.isFinished);
     }
 }
 

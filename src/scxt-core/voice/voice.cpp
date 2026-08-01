@@ -1034,7 +1034,7 @@ void Voice::initializeGenerator()
         GD[currGen].loopFade = variantData.loopFade;
         GD[currGen].playbackLowerBound = variantData.startSample;
         GD[currGen].playbackUpperBound = variantData.endSample;
-        GD[currGen].direction = 1;
+        GD[currGen].loopDirection = 1;
         GD[currGen].isFinished = false;
 
         if (variantData.loopActive)
@@ -1046,9 +1046,9 @@ void Voice::initializeGenerator()
         if (variantData.playReverse)
         {
             GD[currGen].samplePos = GD[currGen].playbackUpperBound;
-            GD[currGen].direction = -1;
+            GD[currGen].loopDirection = -1;
         }
-        GD[currGen].directionAtOutset = GD[currGen].direction;
+        GD[currGen].directionAtOutset = GD[currGen].loopDirection;
 
         calculateGeneratorRatio(calculateVoicePitch(), currIndex, currGen);
 

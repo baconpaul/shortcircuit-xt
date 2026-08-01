@@ -685,10 +685,26 @@ void GeneratorSample(GeneratorState *__restrict GD, GeneratorIO *__restrict IO)
     int IsFinished = GD->isFinished;
     int WaveSize = IO->waveSize;
     int LoopOffset = std::max(1, GD->loopUpperBound - GD->loopLowerBound);
-    int Ratio = GD->ratio;
-    int RatioSign = Ratio < 0 ? -1 : 1;
-    Ratio = std::abs(Ratio);
-    int Direction = GD->direction * RatioSign;
+    const int RatioSign = GD->ratio < 0 ? -1 : 1;
+    const int Ratio = std::abs(GD->ratio);
+
+    /*
+     * Both directions are named locals and are kept in lockstep by turnTo(). Travel is
+     * what moves the playhead and what decides we have run off the end; LoopDir is what
+     * the loop logic reasons about and what directionAtOutset compares against. See the
+     * comment on GeneratorState.
+     */
+    int Travel = GD->loopDirection * RatioSign;
+    int LoopDir = GD->loopDirection;
+    auto turnTo = [&](int newTravel) {
+        if (newTravel == Travel)
+            return;
+        Travel = newTravel;
+        LoopDir = Travel * RatioSign;
+        // a full ping-pong cycle completes each time we turn back onto the outset direction
+        if (LoopDir == GD->directionAtOutset)
+            GD->loopCount++;
+    };
     int16_t *__restrict SampleDataL;
     int16_t *__restrict SampleDataR;
     float *__restrict SampleDataFL;
@@ -914,7 +930,7 @@ void GeneratorSample(GeneratorState *__restrict GD, GeneratorIO *__restrict IO)
 #endif
 
         // 3. Forward sample position
-        SampleSubPos += Ratio * Direction;
+        SampleSubPos += Ratio * Travel;
         int incr = SampleSubPos >> 24;
         SamplePos += incr;
         SampleSubPos = SampleSubPos - (incr << 24);
@@ -926,14 +942,14 @@ void GeneratorSample(GeneratorState *__restrict GD, GeneratorIO *__restrict IO)
             {
                 SamplePos = GD->playbackUpperBound;
                 SampleSubPos = 0;
-                if (GD->direction == 1)
+                if (Travel == 1)
                     IsFinished = true;
             }
             if (SamplePos < GD->playbackLowerBound)
             {
                 SamplePos = GD->playbackLowerBound;
                 SampleSubPos = 0;
-                if (GD->direction == -1)
+                if (Travel == -1)
                     IsFinished = true;
             }
 
@@ -954,7 +970,7 @@ void GeneratorSample(GeneratorState *__restrict GD, GeneratorIO *__restrict IO)
         {
             int offset = SamplePos;
 
-            if (Direction > 0)
+            if (Travel > 0)
             {
                 // Upper
                 if (offset > GD->loopUpperBound)
@@ -982,17 +998,9 @@ void GeneratorSample(GeneratorState *__restrict GD, GeneratorIO *__restrict IO)
         {
             // bidirectional
             if (SamplePos >= GD->loopUpperBound)
-            {
-                if (GD->directionAtOutset == -1 && Direction == 1)
-                    GD->loopCount++;
-                Direction = -1;
-            }
+                turnTo(-1);
             else if (SamplePos <= GD->loopLowerBound)
-            {
-                if (GD->directionAtOutset == 1 && Direction == -1)
-                    GD->loopCount++;
-                Direction = 1;
-            }
+                turnTo(1);
 
             SamplePos = std::clamp(SamplePos, 0, WaveSize);
         }
@@ -1003,7 +1011,7 @@ void GeneratorSample(GeneratorState *__restrict GD, GeneratorIO *__restrict IO)
             {
                 int offset = SamplePos;
 
-                if (Direction > 0)
+                if (Travel > 0)
                 {
                     if (offset > GD->loopUpperBound)
                     {
@@ -1031,14 +1039,14 @@ void GeneratorSample(GeneratorState *__restrict GD, GeneratorIO *__restrict IO)
                 {
                     SamplePos = GD->playbackUpperBound;
                     SampleSubPos = 0;
-                    if (GD->direction == 1)
+                    if (Travel == 1)
                         IsFinished = true;
                 }
                 if (SamplePos < GD->playbackLowerBound)
                 {
                     SamplePos = GD->playbackLowerBound;
                     SampleSubPos = 0;
-                    if (GD->direction == -1)
+                    if (Travel == -1)
                         IsFinished = true;
                 }
             }
@@ -1046,20 +1054,12 @@ void GeneratorSample(GeneratorState *__restrict GD, GeneratorIO *__restrict IO)
         else if constexpr (!loopForward && loopWhileGated)
         {
             // gated bidirecational
-            if (GD->gated || (GD->direction != GD->directionAtOutset))
+            if (GD->gated || (LoopDir != GD->directionAtOutset))
             {
                 if (SamplePos >= GD->loopUpperBound)
-                {
-                    if (GD->directionAtOutset == -1 && Direction == 1)
-                        GD->loopCount++;
-                    Direction = -1;
-                }
+                    turnTo(-1);
                 else if (SamplePos <= GD->loopLowerBound)
-                {
-                    if (GD->directionAtOutset == 1 && Direction == -1)
-                        GD->loopCount++;
-                    Direction = 1;
-                }
+                    turnTo(1);
 
                 SamplePos = std::clamp(SamplePos, 0, WaveSize);
             }
@@ -1070,14 +1070,14 @@ void GeneratorSample(GeneratorState *__restrict GD, GeneratorIO *__restrict IO)
                 {
                     SamplePos = GD->playbackUpperBound;
                     SampleSubPos = 0;
-                    if (GD->direction == 1)
+                    if (Travel == 1)
                         IsFinished = true;
                 }
                 if (SamplePos < GD->playbackLowerBound)
                 {
                     SamplePos = GD->playbackLowerBound;
                     SampleSubPos = 0;
-                    if (GD->direction == -1)
+                    if (Travel == -1)
                         IsFinished = true;
                 }
             }
@@ -1168,7 +1168,8 @@ void GeneratorSample(GeneratorState *__restrict GD, GeneratorIO *__restrict IO)
             OutputR[i] = 0.f;
     }
 
-    GD->direction = Direction * RatioSign;
+    GD->travelDirection = Travel;
+    GD->loopDirection = LoopDir;
     GD->samplePos = SamplePos;
     GD->sampleSubPos = SampleSubPos;
     GD->isFinished = IsFinished;
@@ -1183,7 +1184,7 @@ void GeneratorSample(GeneratorState *__restrict GD, GeneratorIO *__restrict IO)
         }
         else
         {
-            if (GD->gated || (GD->directionAtOutset != GD->direction))
+            if (GD->gated || (GD->directionAtOutset != GD->loopDirection))
             {
                 GD->isInLoop = (SamplePos >= GD->loopLowerBound);
                 GD->positionWithinLoop =
