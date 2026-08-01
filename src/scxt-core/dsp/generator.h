@@ -111,9 +111,10 @@ struct GeneratorState
     float positionWithinLoop{0};
     bool isInLoop{false};
 
-    // has the playhead wrapped at least once? travelling away from the seam there is
-    // nothing to crossfade against until it has
-    bool hasWrapped{false};
+    // has the playhead crossed a loop boundary at least once - wrapped, or turned
+    // around in an alternate loop? Retreating from a seam there is nothing to
+    // crossfade against until it has.
+    bool hasLooped{false};
 
     int32_t loopFade{0};
 

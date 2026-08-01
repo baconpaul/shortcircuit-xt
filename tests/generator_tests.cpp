@@ -111,8 +111,9 @@ struct GenConfig
     scxt::dsp::InterpolationTypes interp{scxt::dsp::InterpolationTypes::Sinc};
     int warmupBlocks{32};
     int recordBlocks{10};
-    int ungateAtBlock{-1}; // relative to the start of the recorded region
-    int startPos{-1};      // -1 means the natural start for the direction
+    int ungateAtBlock{-1};    // relative to the start of the recorded region
+    int startPos{-1};         // -1 means the natural start for the direction
+    int blockSizeOverride{0}; // 0 means the engine block size
 };
 
 struct GenHarness
@@ -128,6 +129,8 @@ struct GenHarness
     float outR alignas(16)[scxt::blockSize * 2];
 
     std::vector<float> recL, recR;
+    // only meaningful with blockSizeOverride == 1, where one call is one sample
+    std::vector<int> recPos;
 
     // seam bookkeeping, filled in by run()
     int seamsInRecord{0};
@@ -180,7 +183,7 @@ struct GenHarness
         gs.loopInvertedBounds = 1.f / std::max(1, gs.loopUpperBound - gs.loopLowerBound);
         gs.loopFade = c.loopFade;
         gs.ratio = c.ratio;
-        gs.blockSize = scxt::blockSize;
+        gs.blockSize = c.blockSizeOverride > 0 ? c.blockSizeOverride : scxt::blockSize;
         gs.isFinished = false;
         gs.gated = true;
         gs.loopCount = -1;
@@ -206,6 +209,7 @@ struct GenHarness
 
         recL.clear();
         recR.clear();
+        recPos.clear();
         seamsInRecord = 0;
 
         // A seam is either a wrap (position jumps by much more than one block of
@@ -220,7 +224,10 @@ struct GenHarness
             if (b == c.ungateAtBlock)
                 gs.gated = false;
 
+            const auto posBefore = gs.samplePos;
             fn(&gs, &io);
+            if (gs.blockSize == 1)
+                recPos.push_back(posBefore);
 
             for (int i = 0; i < gs.blockSize; ++i)
             {
@@ -415,6 +422,25 @@ TEST_CASE("Generator output does not depend on block phase", "[generator]")
         c.loopFade = gFade;
         checkBlockPhaseInvariance(c);
     }
+
+    SECTION("alternate loop with fade")
+    {
+        GenConfig c;
+        c.name = "phase-alt-fade";
+        c.loopForward = false;
+        c.loopFade = gFade;
+        checkBlockPhaseInvariance(c);
+    }
+
+    SECTION("alternate loop with fade, started in reverse")
+    {
+        GenConfig c;
+        c.name = "phase-alt-rev-fade";
+        c.loopForward = false;
+        c.playReverse = true;
+        c.loopFade = gFade;
+        checkBlockPhaseInvariance(c);
+    }
 }
 
 TEST_CASE("Generator crossfade keeps the loop seam continuous", "[generator]")
@@ -460,6 +486,74 @@ TEST_CASE("Generator crossfade keeps the loop seam continuous", "[generator]")
         auto got = capture(c, h);
         INFO("worst step " << worstStep(got));
         REQUIRE(worstStep(got) < maxStep);
+    }
+}
+
+TEST_CASE("Generator alternate loop crossfade mirrors about the turnaround", "[generator]")
+{
+    /*
+     * A ping-pong bound has no discontinuity to hide - the playhead reverses, so the
+     * value is continuous - but the waveform audibly mirrors. The crossfade straddles
+     * the turnaround and blends the playhead against its reflection in the bound.
+     *
+     * Two things follow, and both are checked here. Exactly at the bound the playhead
+     * and its reflection are the same sample, so the crossfade must be a no-op there
+     * however its gain is shaped. Away from the bound but inside the window it has to
+     * actually change the output, or it is not running at all.
+     *
+     * Driven a sample at a time so the output can be lined up with the playhead.
+     */
+    auto render = [](bool reverse, int32_t fade, std::vector<int> *positions) {
+        GenConfig c;
+        c.name = "alt-mirror";
+        c.loopForward = false;
+        c.playReverse = reverse;
+        c.loopFade = fade;
+        c.blockSizeOverride = 1;
+        c.warmupBlocks = 512;
+        c.recordBlocks = 512;
+
+        GenHarness h(c);
+        h.run(c);
+        if (positions)
+            *positions = h.recPos;
+        return h.recL;
+    };
+
+    for (bool reverse : {false, true})
+    {
+        DYNAMIC_SECTION("reverse=" << reverse)
+        {
+            std::vector<int> pos;
+            auto faded = render(reverse, gFade, &pos);
+            auto plain = render(reverse, 0, nullptr);
+
+            REQUIRE(faded.size() == plain.size());
+            REQUIRE(pos.size() == faded.size());
+
+            int atBound{0}, changedInWindow{0};
+            const int half = gFade / 2;
+            for (size_t i = 0; i < faded.size(); ++i)
+            {
+                const bool onBound = pos[i] == gStartLoop || pos[i] == gEndLoop;
+                const bool inWindow =
+                    std::abs(pos[i] - gStartLoop) <= half || std::abs(pos[i] - gEndLoop) <= half;
+                if (onBound)
+                {
+                    INFO("bound sample " << i << " at position " << pos[i]);
+                    REQUIRE(faded[i] == Approx(plain[i]).margin(1e-6));
+                    atBound++;
+                }
+                else if (inWindow && std::abs(faded[i] - plain[i]) > 1e-4)
+                {
+                    changedInWindow++;
+                }
+            }
+
+            INFO("bound samples " << atBound << ", changed in window " << changedInWindow);
+            REQUIRE(atBound >= 2);          // the capture really did turn around
+            REQUIRE(changedInWindow > 100); // and the crossfade really is doing something
+        }
     }
 }
 
@@ -1227,6 +1321,144 @@ TEST_CASE("Generator golden - forward loop with fade", "[generator][golden]")
         c.loopFade = gFade;
         c.ratio = cases[ci].ratio;
         c.recordBlocks = cases[ci].recordBlocks;
+
+        GenHarness h(c);
+        goldenCheckOrPrint(c.name, capture(c, h), expected[ci]);
+    }
+}
+
+TEST_CASE("Generator golden - alternate loop with fade", "[generator][golden]")
+{
+    // The mirror crossfade at each ping-pong turnaround. Previously these got the wrap
+    // crossfade, which blended in pre-loop material at a bound that has no seam.
+    struct Case
+    {
+        const char *name;
+        bool reverse;
+    };
+    static const std::array<Case, 2> cases{{{"loop-alt-fade", false}, {"loop-alt-rev-fade", true}}};
+
+    static const std::array<std::vector<float>, 2> expected{{
+        // loop-alt-fade
+        {-0.053108696f, -0.053137645f, -0.005574957f, 0.026069308f,  0.032455869f,  0.015860550f,
+         -0.023781974f, -0.082882792f, -0.156829178f, -0.239940047f, -0.326186597f, -0.409795493f,
+         -0.485811532f, -0.550553977f, -0.601923823f, -0.639536858f, -0.664669752f, -0.646715641f,
+         -0.694735646f, -0.692423582f, -0.639946938f, -0.541107416f, -0.403065801f, -0.235822931f,
+         -0.051495228f, 0.136563197f,  0.314727873f,  0.470091254f,  0.591397583f,  0.669858217f,
+         0.699789107f,  0.679021835f,  0.609060943f,  0.494974732f,  0.345028788f,  0.170086160f,
+         -0.017178826f, -0.203199223f, -0.374498308f, -0.518665791f, -0.625257015f, -0.686549723f,
+         -0.698103189f, -0.659080923f, -0.572309494f, -0.444075286f, -0.283668905f, -0.102711365f,
+         0.085687436f,  0.277077287f,  0.444564164f,  0.574843705f,  0.657669842f,  0.686654806f,
+         0.659760296f,  0.579440832f,  0.452428967f,  0.289181441f,  0.103030965f,  -0.090889372f,
+         -0.276861191f, -0.439840853f, -0.566662967f, -0.647092760f, -0.674643159f, -0.653317094f,
+         -0.590658545f, -0.490546912f, -0.359188080f, -0.204740986f, -0.036824599f, 0.134065032f,
+         0.297194451f,  0.442250788f,  0.559980214f,  0.642767012f,  0.685119390f,  0.684030771f,
+         0.639192879f,  0.553046286f,  0.430662155f,  -0.102711365f, -0.283668905f, -0.444075286f,
+         -0.572309494f, -0.659080923f, -0.698103189f, -0.686549723f, -0.625257015f, -0.518665791f,
+         -0.374498308f, -0.203199223f, -0.017178826f, 0.170086160f,  0.345028788f,  0.494974732f,
+         0.609060943f,  0.679021835f,  0.699789107f,  0.669858217f,  0.591397583f,  0.470091254f,
+         0.314727873f,  0.136563197f,  -0.051495228f, -0.235822931f, -0.403065801f, -0.541107416f,
+         -0.639946938f, -0.692423582f, -0.694735646f, -0.646715641f, -0.551842451f, -0.424168438f,
+         -0.275259644f, -0.118468046f, 0.033175513f,  0.167976737f,  0.276434630f,  0.351877540f,
+         0.390836775f,  0.393142760f,  0.361714154f,  0.302357614f,  0.222064540f,  0.131811932f,
+         0.036794022f,  -0.046667691f, -0.053108696f, -0.053137645f, -0.005574957f, 0.026069308f,
+         0.032455869f,  0.015860550f,  -0.023781974f, -0.082882792f, -0.156829178f, -0.239940047f,
+         -0.326186597f, -0.409795493f, -0.485811532f, -0.550553977f, -0.601923823f, -0.639536858f,
+         -0.664669752f, -0.646715641f, -0.694735646f, -0.692423582f, -0.639946938f, -0.541107416f,
+         -0.403065801f, -0.235822931f, -0.051495228f, 0.136563197f,  0.314727873f,  0.470091254f,
+         0.591397583f,  0.669858217f,  0.699789107f,  0.679021835f,  0.609060943f,  0.494974732f,
+         0.345028788f,  0.170086160f,  -0.017178826f, -0.203199223f, -0.374498308f, -0.518665791f,
+         -0.625257015f, -0.686549723f, -0.698103189f, -0.659080923f, -0.572309494f, -0.444075286f,
+         -0.283668905f, -0.102711365f, 0.085687436f,  0.277077287f,  0.444564164f,  0.574843705f,
+         0.657669842f,  0.686654806f,  0.659760296f,  0.579440832f,  0.452428967f,  0.289181441f,
+         0.103030965f,  -0.090889372f, -0.276861191f, -0.439840853f, -0.566662967f, -0.647092760f,
+         -0.674643159f, -0.653317094f, -0.590658545f, -0.490546912f, -0.359188080f, -0.204740986f,
+         -0.036824599f, 0.134065032f,  0.297194451f,  0.442250788f,  0.559980214f,  0.642767012f,
+         0.685119390f,  0.684030771f,  0.639192879f,  0.553046286f,  0.430662155f,  -0.102711365f,
+         -0.283668905f, -0.444075286f, -0.572309494f, -0.659080923f, -0.698103189f, -0.686549723f,
+         -0.625257015f, -0.518665791f, -0.374498308f, -0.203199223f, -0.017178826f, 0.170086160f,
+         0.345028788f,  0.494974732f,  0.609060943f,  0.679021835f,  0.699789107f,  0.669858217f,
+         0.591397583f,  0.470091254f,  0.314727873f,  0.136563197f,  -0.051495228f, -0.235822931f,
+         -0.403065801f, -0.541107416f, -0.639946938f, -0.692423582f, -0.694735646f, -0.646715641f,
+         -0.551842451f, -0.424168438f, -0.275259644f, -0.118468046f, 0.033175513f,  0.167976737f,
+         0.276434630f,  0.351877540f,  0.390836775f,  0.393142760f,  0.361714154f,  0.302357614f,
+         0.222064540f,  0.131811932f,  0.036794022f,  -0.046667691f, -0.053108696f, -0.053137645f,
+         -0.005574957f, 0.026069308f,  0.032455869f,  0.015860550f,  -0.023781974f, -0.082882792f,
+         -0.156829178f, -0.239940047f, -0.326186597f, -0.409795493f, -0.485811532f, -0.550553977f,
+         -0.601923823f, -0.639536858f, -0.664669752f, -0.646715641f, -0.694735646f, -0.692423582f,
+         -0.639946938f, -0.541107416f, -0.403065801f, -0.235822931f, -0.051495228f, 0.136563197f,
+         0.314727873f,  0.470091254f,  0.591397583f,  0.669858217f,  0.699789107f,  0.679021835f,
+         0.609060943f,  0.494974732f,  0.345028788f,  0.170086160f,  -0.017178826f, -0.203199223f,
+         -0.374498308f, -0.518665791f, -0.625257015f, -0.686549723f, -0.698103189f, -0.659080923f,
+         -0.572309494f, -0.444075286f, -0.283668905f, -0.102711365f, 0.085687436f,  0.277077287f,
+         0.444564164f,  0.574843705f,  0.657669842f,  0.686654806f,  0.659760296f,  0.579440832f,
+         0.452428967f,  0.289181441f,  0.103030965f,  -0.090889372f, -0.276861191f, -0.439840853f,
+         -0.566662967f, -0.647092760f},
+        // loop-alt-rev-fade
+        {-0.053108696f, -0.053137645f, -0.005574957f, 0.026069308f,  0.032455869f,  0.015860550f,
+         -0.023781974f, -0.082882792f, -0.156829178f, -0.239940047f, -0.326186597f, -0.409795493f,
+         -0.485811532f, -0.550553977f, -0.601923823f, -0.639536858f, -0.664669752f, -0.646715641f,
+         -0.694735646f, -0.692423582f, -0.639946938f, -0.541107416f, -0.403065801f, -0.235822931f,
+         -0.051495228f, 0.136563197f,  0.314727873f,  0.470091254f,  0.591397583f,  0.669858217f,
+         0.699789107f,  0.679021835f,  0.609060943f,  0.494974732f,  0.345028788f,  0.170086160f,
+         -0.017178826f, -0.203199223f, -0.374498308f, -0.518665791f, -0.625257015f, -0.686549723f,
+         -0.698103189f, -0.659080923f, -0.572309494f, -0.444075286f, -0.283668905f, -0.102711365f,
+         0.085687436f,  0.277077287f,  0.444564164f,  0.574843705f,  0.657669842f,  0.686654806f,
+         0.659760296f,  0.579440832f,  0.452428967f,  0.289181441f,  0.103030965f,  -0.090889372f,
+         -0.276861191f, -0.439840853f, -0.566662967f, -0.647092760f, -0.674643159f, -0.653317094f,
+         -0.590658545f, -0.490546912f, -0.359188080f, -0.204740986f, -0.036824599f, 0.134065032f,
+         0.297194451f,  0.442250788f,  0.559980214f,  0.642767012f,  0.685119390f,  0.684030771f,
+         0.639192879f,  0.553046286f,  0.430662155f,  -0.102711365f, -0.283668905f, -0.444075286f,
+         -0.572309494f, -0.659080923f, -0.698103189f, -0.686549723f, -0.625257015f, -0.518665791f,
+         -0.374498308f, -0.203199223f, -0.017178826f, 0.170086160f,  0.345028788f,  0.494974732f,
+         0.609060943f,  0.679021835f,  0.699789107f,  0.669858217f,  0.591397583f,  0.470091254f,
+         0.314727873f,  0.136563197f,  -0.051495228f, -0.235822931f, -0.403065801f, -0.541107416f,
+         -0.639946938f, -0.692423582f, -0.694735646f, -0.646715641f, -0.551842451f, -0.424168438f,
+         -0.275259644f, -0.118468046f, 0.033175513f,  0.167976737f,  0.276434630f,  0.351877540f,
+         0.390836775f,  0.393142760f,  0.361714154f,  0.302357614f,  0.222064540f,  0.131811932f,
+         0.036794022f,  -0.046667691f, -0.053108696f, -0.053137645f, -0.005574957f, 0.026069308f,
+         0.032455869f,  0.015860550f,  -0.023781974f, -0.082882792f, -0.156829178f, -0.239940047f,
+         -0.326186597f, -0.409795493f, -0.485811532f, -0.550553977f, -0.601923823f, -0.639536858f,
+         -0.664669752f, -0.646715641f, -0.694735646f, -0.692423582f, -0.639946938f, -0.541107416f,
+         -0.403065801f, -0.235822931f, -0.051495228f, 0.136563197f,  0.314727873f,  0.470091254f,
+         0.591397583f,  0.669858217f,  0.699789107f,  0.679021835f,  0.609060943f,  0.494974732f,
+         0.345028788f,  0.170086160f,  -0.017178826f, -0.203199223f, -0.374498308f, -0.518665791f,
+         -0.625257015f, -0.686549723f, -0.698103189f, -0.659080923f, -0.572309494f, -0.444075286f,
+         -0.283668905f, -0.102711365f, 0.085687436f,  0.277077287f,  0.444564164f,  0.574843705f,
+         0.657669842f,  0.686654806f,  0.659760296f,  0.579440832f,  0.452428967f,  0.289181441f,
+         0.103030965f,  -0.090889372f, -0.276861191f, -0.439840853f, -0.566662967f, -0.647092760f,
+         -0.674643159f, -0.653317094f, -0.590658545f, -0.490546912f, -0.359188080f, -0.204740986f,
+         -0.036824599f, 0.134065032f,  0.297194451f,  0.442250788f,  0.559980214f,  0.642767012f,
+         0.685119390f,  0.684030771f,  0.639192879f,  0.553046286f,  0.430662155f,  -0.102711365f,
+         -0.283668905f, -0.444075286f, -0.572309494f, -0.659080923f, -0.698103189f, -0.686549723f,
+         -0.625257015f, -0.518665791f, -0.374498308f, -0.203199223f, -0.017178826f, 0.170086160f,
+         0.345028788f,  0.494974732f,  0.609060943f,  0.679021835f,  0.699789107f,  0.669858217f,
+         0.591397583f,  0.470091254f,  0.314727873f,  0.136563197f,  -0.051495228f, -0.235822931f,
+         -0.403065801f, -0.541107416f, -0.639946938f, -0.692423582f, -0.694735646f, -0.646715641f,
+         -0.551842451f, -0.424168438f, -0.275259644f, -0.118468046f, 0.033175513f,  0.167976737f,
+         0.276434630f,  0.351877540f,  0.390836775f,  0.393142760f,  0.361714154f,  0.302357614f,
+         0.222064540f,  0.131811932f,  0.036794022f,  -0.046667691f, -0.053108696f, -0.053137645f,
+         -0.005574957f, 0.026069308f,  0.032455869f,  0.015860550f,  -0.023781974f, -0.082882792f,
+         -0.156829178f, -0.239940047f, -0.326186597f, -0.409795493f, -0.485811532f, -0.550553977f,
+         -0.601923823f, -0.639536858f, -0.664669752f, -0.646715641f, -0.694735646f, -0.692423582f,
+         -0.639946938f, -0.541107416f, -0.403065801f, -0.235822931f, -0.051495228f, 0.136563197f,
+         0.314727873f,  0.470091254f,  0.591397583f,  0.669858217f,  0.699789107f,  0.679021835f,
+         0.609060943f,  0.494974732f,  0.345028788f,  0.170086160f,  -0.017178826f, -0.203199223f,
+         -0.374498308f, -0.518665791f, -0.625257015f, -0.686549723f, -0.698103189f, -0.659080923f,
+         -0.572309494f, -0.444075286f, -0.283668905f, -0.102711365f, 0.085687436f,  0.277077287f,
+         0.444564164f,  0.574843705f,  0.657669842f,  0.686654806f,  0.659760296f,  0.579440832f,
+         0.452428967f,  0.289181441f,  0.103030965f,  -0.090889372f, -0.276861191f, -0.439840853f,
+         -0.566662967f, -0.647092760f},
+    }};
+
+    for (size_t ci = 0; ci < cases.size(); ++ci)
+    {
+        GenConfig c;
+        c.name = cases[ci].name;
+        c.loopForward = false;
+        c.playReverse = cases[ci].reverse;
+        c.loopFade = gFade;
+        c.recordBlocks = 20;
 
         GenHarness h(c);
         goldenCheckOrPrint(c.name, capture(c, h), expected[ci]);
