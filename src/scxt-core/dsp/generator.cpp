@@ -309,25 +309,27 @@ void KernelOp<InterpolationTypes::ZOHAA, T>::Process(
     f_subPos = std::pow(f_subPos, 0.5f * subRatio + 0.5f / subRatio);
 
     auto readPos = FIRoffset - 2;
-    auto y0{NormalizeSampleToF32(readSampleL[readPos])};
-    auto y1{NormalizeSampleToF32(readSampleL[readPos + 1])};
-    auto y2{NormalizeSampleToF32(readSampleL[readPos + 2])};
-    auto y3{NormalizeSampleToF32(readSampleL[readPos + 3])};
-    auto a = ((3.f * (y1 - y2)) - y0 + y3) * 0.5f;
-    auto b = y2 + y2 + y0 - (5.f * y1 + y3) * 0.5f;
-    auto c = (y2 - y0) * 0.5f;
 
-    OutputL[i] = ((a * f_subPos + b) * f_subPos + c) * f_subPos + y1;
+    // The crossfade partner has to be interpolated exactly like the main read. It used
+    // to be a linear blend of [readPos, readPos+1] - one sample early, since the cubic
+    // sits between readPos+1 and readPos+2 - using the already pow-warped subposition.
+    auto cubic = [readPos, f_subPos](const T *__restrict src) {
+        auto y0{NormalizeSampleToF32(src[readPos])};
+        auto y1{NormalizeSampleToF32(src[readPos + 1])};
+        auto y2{NormalizeSampleToF32(src[readPos + 2])};
+        auto y3{NormalizeSampleToF32(src[readPos + 3])};
+        auto a = ((3.f * (y1 - y2)) - y0 + y3) * 0.5f;
+        auto b = y2 + y2 + y0 - (5.f * y1 + y3) * 0.5f;
+        auto c = (y2 - y0) * 0.5f;
+        return ((a * f_subPos + b) * f_subPos + c) * f_subPos + y1;
+    };
+
+    OutputL[i] = cubic(readSampleL);
 
     if constexpr (LOOP_ACTIVE)
     {
         if (ks.fadeActive)
-        {
-            auto fadeVal0{NormalizeSampleToF32(readFadeSampleL[readPos])};
-            auto fadeVal1{NormalizeSampleToF32(readFadeSampleL[readPos + 1])};
-            auto fadeVal = fadeVal0 * (1 - f_subPos) + fadeVal1 * f_subPos;
-            OutputL[i] = OutputL[i] * ks.mainGain + fadeVal * ks.partnerGain;
-        }
+            OutputL[i] = OutputL[i] * ks.mainGain + cubic(readFadeSampleL) * ks.partnerGain;
     }
 
     if constexpr (NUM_CHANNELS == 2)
@@ -336,26 +338,12 @@ void KernelOp<InterpolationTypes::ZOHAA, T>::Process(
         auto readFadeSampleR{ks.ReadFadeSample[1]};
         auto OutputR{ks.Output[1]};
 
-        auto y4{NormalizeSampleToF32(readSampleR[readPos])};
-        auto y5{NormalizeSampleToF32(readSampleR[readPos + 1])};
-        auto y6{NormalizeSampleToF32(readSampleR[readPos + 2])};
-        auto y7{NormalizeSampleToF32(readSampleR[readPos + 3])};
-        auto a = ((3.f * (y5 - y6)) - y4 + y7) * 0.5f;
-        auto b = y6 + y6 + y4 - (5.f * y5 + y7) * 0.5f;
-        auto c = (y6 - y4) * 0.5f;
-
-        OutputR[i] = ((a * f_subPos + b) * f_subPos + c) * f_subPos + y5;
+        OutputR[i] = cubic(readSampleR);
 
         if constexpr (LOOP_ACTIVE)
         {
             if (ks.fadeActive)
-            {
-                float fadeVal0{NormalizeSampleToF32(readFadeSampleR[readPos])};
-                float fadeVal1{NormalizeSampleToF32(readFadeSampleR[readPos + 1])};
-                auto fadeVal = fadeVal0 * (1 - f_subPos) + fadeVal1 * f_subPos;
-
-                OutputR[i] = OutputR[i] * ks.mainGain + fadeVal * ks.partnerGain;
-            }
+                OutputR[i] = OutputR[i] * ks.mainGain + cubic(readFadeSampleR) * ks.partnerGain;
         }
     }
 }
@@ -1179,27 +1167,26 @@ void GeneratorSample(GeneratorState *__restrict GD, GeneratorIO *__restrict IO)
 
     if constexpr (loopActive)
     {
+        /*
+         * Inside the loop region, not merely past its lower bound. A reverse voice
+         * starts at playbackUpperBound, which is above the loop, so the old test made it
+         * "in loop" on its very first block and bumped loopCount from -1 to 0 before any
+         * loop had been entered - which fed the Is Looping and Loop Count modulation
+         * sources and the loop-count play mode. A released gated loop running out into
+         * the tail is past the upper bound and likewise is no longer looping.
+         */
+        const bool withinLoopBounds =
+            SamplePos >= GD->loopLowerBound && SamplePos <= GD->loopUpperBound;
+
+        GD->positionWithinLoop =
+            std::clamp((SamplePos - GD->loopLowerBound) * GD->loopInvertedBounds, 0.f, 1.f);
+
         if (!loopWhileGated)
-        {
-            GD->isInLoop = (SamplePos >= GD->loopLowerBound);
-            GD->positionWithinLoop =
-                std::clamp((SamplePos - GD->loopLowerBound) * GD->loopInvertedBounds, 0.f, 1.f);
-        }
+            GD->isInLoop = withinLoopBounds;
         else
-        {
-            if (GD->gated || (GD->directionAtOutset != GD->loopDirection))
-            {
-                GD->isInLoop = (SamplePos >= GD->loopLowerBound);
-                GD->positionWithinLoop =
-                    std::clamp((SamplePos - GD->loopLowerBound) * GD->loopInvertedBounds, 0.f, 1.f);
-            }
-            else
-            {
-                GD->isInLoop = false;
-                GD->positionWithinLoop =
-                    std::clamp((SamplePos - GD->loopLowerBound) * GD->loopInvertedBounds, 0.f, 1.f);
-            }
-        }
+            GD->isInLoop =
+                withinLoopBounds && (GD->gated || (GD->directionAtOutset != GD->loopDirection));
+
         if (GD->isInLoop && GD->loopCount < 0)
             GD->loopCount = 0;
     }

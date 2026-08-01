@@ -103,8 +103,6 @@ struct GeneratorState
     int32_t ratio{1 << 24};        // 1 << 24 is playback-at-tempo
     int16_t blockSize{scxt::blockSize};
     bool isFinished{true};
-    int32_t sampleStart{0};
-    int32_t sampleStop{0};
     bool gated{0};
     int16_t loopCount{-1};        // if this is positive then we play this many loops no matter what
     int16_t directionAtOutset{1}; // the loopDirection we started with
