@@ -664,23 +664,10 @@ void GeneratorSample(GeneratorState *__restrict GD, GeneratorIO *__restrict IO)
     float *__restrict OutputL;
     float *__restrict OutputR;
 
-    /*
-     * How far the partner stream reads outside the loop depends on which shape of
-     * crossfade this mode uses, so the clamp does too. A forward loop reads the
-     * loopFade samples immediately before startLoop; an alternate loop mirrors about
-     * each bound and so reads half a fade beyond both of them.
-     */
-    int loopFade = GD->loopFade;
-    if constexpr (loopForward)
-    {
-        loopFade = std::min(loopFade, GD->loopLowerBound - GD->playbackLowerBound);
-    }
-    else
-    {
-        loopFade = std::min(loopFade, 2 * (GD->loopLowerBound - GD->playbackLowerBound));
-        loopFade = std::min(loopFade, 2 * (GD->playbackUpperBound - GD->loopUpperBound));
-    }
-    loopFade = std::min(loopFade, GD->loopUpperBound - GD->loopLowerBound);
+    // shared with the editor so the XF value on screen is the one you hear
+    const int loopFade =
+        (int)clampLoopFade(GD->loopFade, GD->playbackLowerBound, GD->playbackUpperBound,
+                           GD->loopLowerBound, GD->loopUpperBound, !loopForward);
     const int fadeLo = GD->loopUpperBound - loopFade;
 
     GD->positionWithinLoop = 0.f;

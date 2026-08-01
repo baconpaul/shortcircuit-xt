@@ -47,7 +47,6 @@ void SampleWaveform::rebuildHotZones()
     }
     auto r = getInsetBounds();
 
-    auto fade = xPixelForSampleDistance(v.loopFade);
     auto start = xPixelForSample(v.startSample);
     auto end = xPixelForSample(v.endSample);
     auto ls = xPixelForSample(v.startLoop);
@@ -60,7 +59,12 @@ void SampleWaveform::rebuildHotZones()
     startLoopHZ = juce::Rectangle<int>(ls, r.getY(), hotZoneSize, hotZoneSize);
     endLoopHZ = juce::Rectangle<int>(le - hotZoneSize, r.getY(), hotZoneSize, hotZoneSize);
 
-    fadeLoopHz = juce::Rectangle<int>(ls - fade, r.getY(), fade, r.getHeight());
+    // the fade for a forward loop sits at the end of the loop, not before its start
+    auto fadeLen = (int)scxt::dsp::clampLoopFade(
+        v.loopFade, v.startSample, v.endSample, v.startLoop, v.endLoop,
+        v.loopDirection == engine::Zone::ALTERNATE_DIRECTIONS);
+    auto fade = xPixelForSampleDistance(fadeLen);
+    fadeLoopHz = juce::Rectangle<int>(le - fade, r.getY(), fade, r.getHeight());
     repaint();
 
     slicePixelAndSamplePositions.clear();
@@ -582,20 +586,49 @@ void SampleWaveform::paint(juce::Graphics &g)
     auto ss = xPixelForSample(v.startSample, false);
     auto se = xPixelForSample(v.endSample, false);
     auto ls = xPixelForSample(v.startLoop, false);
-    auto fs = xPixelForSample(v.startLoop - v.loopFade, false);
-    auto fe = xPixelForSample(v.startLoop + v.loopFade, false);
     auto le = xPixelForSample(v.endLoop, false);
 
     auto bg1 = editor->themeColor(theme::ColorMap::bg_1);
     auto imf = editor->themeApplier.interBoldFor(10);
 
+    /*
+     * Draw the crossfade where the engine actually performs it, at the clamped length
+     * the engine actually uses. This used to be a symmetric triangle around startLoop,
+     * which is neither: nothing happens after startLoop, and for a forward loop the
+     * fade itself lives up at endLoop.
+     */
+    const auto alternate = v.loopDirection == engine::Zone::ALTERNATE_DIRECTIONS;
+    const auto fadeLen = scxt::dsp::clampLoopFade(v.loopFade, v.startSample, v.endSample,
+                                                  v.startLoop, v.endLoop, alternate);
+
     // this order matters. We want the fade line below the hot zones
-    if (v.loopActive && v.loopFade > 0 &&
-        ((fe >= 0 && fe <= getWidth()) || (fs >= 0 && fs <= getWidth())))
+    if (v.loopActive && fadeLen > 0)
     {
         g.setColour(editor->themeColor(theme::ColorMap::generic_content_medium));
-        g.drawLine(fs, r.getBottom(), ls, r.getY());
-        g.drawLine(ls, r.getY(), fe, r.getBottom());
+        // a ramp from silent at one end of the window to full at the seam
+        auto ramp = [&](int64_t fromSample, int64_t toSample) {
+            auto a = xPixelForSample(fromSample, false);
+            auto b = xPixelForSample(toSample, false);
+            if ((a < 0 || a > getWidth()) && (b < 0 || b > getWidth()))
+                return;
+            g.drawLine(a, r.getBottom(), b, r.getY());
+        };
+
+        if (alternate)
+        {
+            // mirrored about each turnaround, so a tent peaked on each bound
+            auto half = fadeLen / 2;
+            ramp(v.startLoop - half, v.startLoop);
+            ramp(v.startLoop + half, v.startLoop);
+            ramp(v.endLoop - half, v.endLoop);
+            ramp(v.endLoop + half, v.endLoop);
+        }
+        else
+        {
+            // the tail of the loop crossfading into the material before startLoop
+            ramp(v.endLoop - fadeLen, v.endLoop);
+            ramp(v.startLoop - fadeLen, v.startLoop);
+        }
     }
 
     // Draw slices before markers so they don't occlude on overdrat

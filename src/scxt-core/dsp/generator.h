@@ -27,6 +27,7 @@
 
 #ifndef SCXT_SRC_SCXT_CORE_DSP_GENERATOR_H
 #define SCXT_SRC_SCXT_CORE_DSP_GENERATOR_H
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include "configuration.h"
@@ -120,6 +121,35 @@ struct GeneratorState
 
     InterpolationTypes interpolationType{InterpolationTypes::Sinc};
 };
+
+/*
+ * How much of a loop crossfade is actually usable, given where the partner stream has
+ * to read from.
+ *
+ * A forward loop crossfades across the wrap and its partner is the loopFade samples
+ * immediately before startLoop. An alternate loop crossfades across each turnaround
+ * against the playhead's reflection in that bound, so it reaches half a fade beyond
+ * both bounds.
+ *
+ * The engine and the editor both go through here, so the XF value on screen is the one
+ * you hear. The engine used to clamp silently while the editor showed whatever you
+ * dialled in.
+ */
+inline int64_t clampLoopFade(int64_t loopFade, int64_t startSample, int64_t endSample,
+                             int64_t startLoop, int64_t endLoop, bool alternate)
+{
+    auto f = std::min(std::max((int64_t)0, loopFade), endLoop - startLoop);
+    if (alternate)
+    {
+        f = std::min(f, 2 * (startLoop - startSample));
+        f = std::min(f, 2 * (endSample - endLoop));
+    }
+    else
+    {
+        f = std::min(f, startLoop - startSample);
+    }
+    return std::max((int64_t)0, f);
+}
 
 struct GeneratorIO
 {
