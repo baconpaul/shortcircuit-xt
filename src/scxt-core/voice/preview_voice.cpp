@@ -76,6 +76,7 @@ struct PreviewVoice::Details
         GD.isFinished = false;
         GD.directionAtOutset = GD.loopDirection;
         GD.gated = true;
+        GD.hasWrapped = false; // GD is reused across previews
 
         GD.ratio = (int32_t)((double)(1 << 24) * sample->sample_rate * parent->samplerate_inv);
 

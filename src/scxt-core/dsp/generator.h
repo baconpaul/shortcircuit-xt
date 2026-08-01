@@ -111,6 +111,10 @@ struct GeneratorState
     float positionWithinLoop{0};
     bool isInLoop{false};
 
+    // has the playhead wrapped at least once? travelling away from the seam there is
+    // nothing to crossfade against until it has
+    bool hasWrapped{false};
+
     int32_t loopFade{0};
 
     InterpolationTypes interpolationType{InterpolationTypes::Sinc};

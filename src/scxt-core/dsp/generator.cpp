@@ -714,9 +714,7 @@ void GeneratorSample(GeneratorState *__restrict GD, GeneratorIO *__restrict IO)
 
     int loopFade = std::min(GD->loopFade, GD->loopLowerBound - GD->playbackLowerBound);
     loopFade = std::min(loopFade, GD->loopUpperBound - GD->loopLowerBound);
-
-    bool fadeActive =
-        SamplePos > (GD->loopUpperBound - loopFade) && SamplePos <= GD->loopUpperBound;
+    const int fadeLo = GD->loopUpperBound - loopFade;
 
     GD->positionWithinLoop = 0.f;
     GD->isInLoop = false;
@@ -746,74 +744,132 @@ void GeneratorSample(GeneratorState *__restrict GD, GeneratorIO *__restrict IO)
     float *__restrict readFadeSampleRF32 = nullptr;
     float loopEndBufferLF32[resampFIRSize], loopEndBufferRF32[resampFIRSize];
 
-    if (fp)
-    {
-        // See comment above - the generator wants an FIRoffset centered data set
-        readSampleLF32 = SampleDataFL + SamplePos - FIRoffset;
-        if (stereo)
-            readSampleRF32 = SampleDataFR + SamplePos - FIRoffset;
+    /*
+     * Is the loop still what is driving playback? Once a gated loop is released the
+     * playhead runs on past loopUpperBound into the tail and there is no seam left to
+     * smooth, so the crossfade has to stop rather than blend in unrelated pre-loop
+     * material on the way out.
+     */
+    auto loopIsContinuing = [&]() -> bool {
+        if constexpr (loopWhileGated)
+            return GD->gated || (LoopDir != GD->directionAtOutset);
+        else
+            return true;
+    };
+
+    /*
+     * A pure predicate, evaluated identically at block entry and after every position
+     * advance. It used to be computed once per block and from then on only ever cleared,
+     * so a fade could not begin in the middle of a block. Forward playback approaches the
+     * seam through this window and therefore enters it at gain ~0, where starting a
+     * fraction of a block late is nearly inaudible. Reverse playback leaves the seam
+     * through the window and has to engage at gain ~1 the instant it wraps, which the old
+     * code could not do - so every wrap emitted pure loop tail until the next block
+     * boundary and then jumped to the partner. That is the click in #2149.
+     */
+    auto fadeRunningAt = [&](int p) -> bool {
+        if constexpr (!loopActive || !loopForward)
+        {
+            return false;
+        }
+        else
+        {
+            if (loopFade <= 0 || p <= fadeLo || p > GD->loopUpperBound)
+                return false;
+            /*
+             * Travelling toward the seam, the window is the approach and we always fade.
+             * Travelling away from it, the window is the departure and there is only
+             * something to smooth once a wrap has actually happened - otherwise the first
+             * reverse descent past endLoop would jump straight to gain ~1 and play the
+             * pre-loop material with no seam to hide.
+             */
+            if (Travel < 0 && !GD->hasWrapped)
+                return false;
+            return loopIsContinuing();
+        }
+    };
+
+    /*
+     * Point the main and crossfade reads at p. The fade pointer is refreshed whenever the
+     * fade is running, including on the loop-end-buffer path; it used to live only on the
+     * else of that branch, so it froze whenever the loop ended within a FIR window of the
+     * end of the wave - which is the common case, and precisely where the partner
+     * dominates the output.
+     */
+    auto refreshReads = [&](int p, bool fadeOn) {
+        if constexpr (fp)
+        {
+            // See comment above - the generator wants an FIRoffset centered data set
+            readSampleLF32 = SampleDataFL + p - FIRoffset;
+            if (stereo)
+                readSampleRF32 = SampleDataFR + p - FIRoffset;
+        }
+        else
+        {
+            readSampleL = SampleDataL + p - FIRoffset;
+            if (stereo)
+                readSampleR = SampleDataR + p - FIRoffset;
+        }
 
         if constexpr (loopActive)
         {
-            if (fadeActive)
+            if (fadeOn)
             {
-                auto fadeSamplePos{GD->loopLowerBound - (GD->loopUpperBound - SamplePos)};
-                readFadeSampleLF32 = SampleDataFL + fadeSamplePos - FIRoffset;
-                if (stereo)
-                    readFadeSampleRF32 = SampleDataFR + fadeSamplePos - FIRoffset;
+                auto fadeSamplePos{GD->loopLowerBound - (GD->loopUpperBound - p)};
+                if constexpr (fp)
+                {
+                    readFadeSampleLF32 = SampleDataFL + fadeSamplePos - FIRoffset;
+                    if (stereo)
+                        readFadeSampleRF32 = SampleDataFR + fadeSamplePos - FIRoffset;
+                }
+                else
+                {
+                    readFadeSampleL = SampleDataL + fadeSamplePos - FIRoffset;
+                    if (stereo)
+                        readFadeSampleR = SampleDataR + fadeSamplePos - FIRoffset;
+                }
             }
 
-            if (SamplePos >= WaveSize - resampFIRSize && SamplePos <= GD->loopUpperBound)
+            // we need both checks because if we are just doing a post-release playdown
+            // we don't want to re-pad
+            if (p >= WaveSize - resampFIRSize && p <= GD->loopUpperBound)
             {
                 for (int k = 0; k < resampFIRSize; ++k)
                 {
-                    auto q = k + SamplePos - FIRoffset;
+                    auto q = k + p - FIRoffset;
                     if (q >= GD->loopUpperBound || q >= WaveSize)
                         q -= std::min((unsigned)LoopOffset, q);
-                    loopEndBufferLF32[k] = SampleDataFL[q];
-                    if (stereo)
-                        loopEndBufferRF32[k] = SampleDataFR[q];
+                    if constexpr (fp)
+                    {
+                        loopEndBufferLF32[k] = SampleDataFL[q];
+                        if (stereo)
+                            loopEndBufferRF32[k] = SampleDataFR[q];
+                    }
+                    else
+                    {
+                        loopEndBufferL[k] = SampleDataL[q];
+                        if (stereo)
+                            loopEndBufferR[k] = SampleDataR[q];
+                    }
                 }
-                readSampleLF32 = loopEndBufferLF32;
-                if (stereo)
-                    readSampleRF32 = loopEndBufferRF32;
-            }
-        }
-    }
-    else
-    {
-        readSampleL = SampleDataL + SamplePos - FIRoffset;
-        if (stereo)
-            readSampleR = SampleDataR + SamplePos - FIRoffset;
-
-        if constexpr (loopActive)
-        {
-            if (fadeActive)
-            {
-                auto fadeSamplePos{GD->loopLowerBound - (GD->loopUpperBound - SamplePos)};
-                readFadeSampleL = SampleDataL + fadeSamplePos - FIRoffset;
-                if (stereo)
-                    readFadeSampleR = SampleDataR + fadeSamplePos - FIRoffset;
-            }
-
-            if (SamplePos >= WaveSize - resampFIRSize && SamplePos <= GD->loopUpperBound)
-            {
-                for (int k = 0; k < resampFIRSize; ++k)
+                if constexpr (fp)
                 {
-                    auto q = k + SamplePos - FIRoffset;
-                    if (q >= GD->loopUpperBound || q >= WaveSize)
-                        q -= std::min((unsigned)LoopOffset, q);
-
-                    loopEndBufferL[k] = SampleDataL[q];
+                    readSampleLF32 = loopEndBufferLF32;
                     if (stereo)
-                        loopEndBufferR[k] = SampleDataR[q];
+                        readSampleRF32 = loopEndBufferRF32;
                 }
-                readSampleL = loopEndBufferL;
-                if (stereo)
-                    readSampleR = loopEndBufferR;
+                else
+                {
+                    readSampleL = loopEndBufferL;
+                    if (stereo)
+                        readSampleR = loopEndBufferR;
+                }
             }
         }
-    }
+    };
+
+    bool fadeActive = fadeRunningAt(SamplePos);
+    refreshReads(SamplePos, fadeActive);
 
     int NSamples = GD->blockSize;
 
@@ -952,19 +1008,6 @@ void GeneratorSample(GeneratorState *__restrict GD, GeneratorIO *__restrict IO)
                 if (Travel == -1)
                     IsFinished = true;
             }
-
-            if constexpr (fp)
-            {
-                readSampleLF32 = SampleDataFL + SamplePos - FIRoffset;
-                if (stereo)
-                    readSampleRF32 = SampleDataFR + SamplePos - FIRoffset;
-            }
-            else
-            {
-                readSampleL = SampleDataL + SamplePos - FIRoffset;
-                if (stereo)
-                    readSampleR = SampleDataR + SamplePos - FIRoffset;
-            }
         }
         else if constexpr (!loopWhileGated && loopForward)
         {
@@ -977,6 +1020,7 @@ void GeneratorSample(GeneratorState *__restrict GD, GeneratorIO *__restrict IO)
                 {
                     offset -= LoopOffset;
                     GD->loopCount++;
+                    GD->hasWrapped = true;
                 }
             }
             else
@@ -986,6 +1030,7 @@ void GeneratorSample(GeneratorState *__restrict GD, GeneratorIO *__restrict IO)
                 {
                     offset += LoopOffset;
                     GD->loopCount++;
+                    GD->hasWrapped = true;
                 }
             }
 
@@ -1017,6 +1062,7 @@ void GeneratorSample(GeneratorState *__restrict GD, GeneratorIO *__restrict IO)
                     {
                         offset -= LoopOffset;
                         GD->loopCount++;
+                        GD->hasWrapped = true;
                     }
                 }
                 else
@@ -1025,6 +1071,7 @@ void GeneratorSample(GeneratorState *__restrict GD, GeneratorIO *__restrict IO)
                     {
                         offset += LoopOffset;
                         GD->loopCount++;
+                        GD->hasWrapped = true;
                     }
                 }
 
@@ -1083,81 +1130,8 @@ void GeneratorSample(GeneratorState *__restrict GD, GeneratorIO *__restrict IO)
             }
         }
 
-        if constexpr (loopActive)
-        {
-            if constexpr (fp)
-            {
-                if (SamplePos >= WaveSize - resampFIRSize && SamplePos <= GD->loopUpperBound)
-                {
-                    for (int k = 0; k < resampFIRSize; ++k)
-                    {
-                        auto q = k + SamplePos - FIRoffset;
-                        if (q >= GD->loopUpperBound || q >= WaveSize)
-                            q -= std::min((unsigned)LoopOffset, q);
-                        loopEndBufferLF32[k] = SampleDataFL[q];
-                        if (stereo)
-                            loopEndBufferRF32[k] = SampleDataFR[q];
-                    }
-                    readSampleLF32 = loopEndBufferLF32;
-                    if (stereo)
-                        readSampleRF32 = loopEndBufferRF32;
-                }
-                else
-                {
-                    readSampleLF32 = SampleDataFL + SamplePos - FIRoffset;
-                    if (stereo)
-                        readSampleRF32 = SampleDataFR + SamplePos - FIRoffset;
-
-                    if (fadeActive)
-                    {
-                        auto fadeSamplePos{GD->loopLowerBound - (GD->loopUpperBound - SamplePos)};
-                        readFadeSampleLF32 = SampleDataFL + fadeSamplePos - FIRoffset;
-                        if (stereo)
-                            readFadeSampleRF32 = SampleDataFR + fadeSamplePos - FIRoffset;
-                    }
-                }
-            }
-            else
-            {
-                // we need both checks because if we are just doing a post-release playdown
-                // we don't want to re-pad
-                if (SamplePos >= WaveSize - resampFIRSize && SamplePos <= GD->loopUpperBound)
-                {
-                    for (int k = 0; k < resampFIRSize; ++k)
-                    {
-                        auto q = k + SamplePos - FIRoffset;
-                        if (q >= GD->loopUpperBound || q >= WaveSize)
-                            q -= std::min((unsigned)LoopOffset, q);
-                        loopEndBufferL[k] = SampleDataL[q];
-                        if (stereo)
-                            loopEndBufferR[k] = SampleDataR[q];
-                    }
-                    readSampleL = loopEndBufferL;
-                    if (stereo)
-                        readSampleR = loopEndBufferR;
-                }
-                else
-                {
-                    readSampleL = SampleDataL + SamplePos - FIRoffset;
-                    if (stereo)
-                        readSampleR = SampleDataR + SamplePos - FIRoffset;
-
-                    if (fadeActive)
-                    {
-                        auto fadeSamplePos{GD->loopLowerBound - (GD->loopUpperBound - SamplePos)};
-                        readFadeSampleL = SampleDataL + fadeSamplePos - FIRoffset;
-                        if (stereo)
-                            readFadeSampleR = SampleDataR + fadeSamplePos - FIRoffset;
-                    }
-                }
-            }
-        }
-
-        if constexpr (loopActive)
-        {
-            fadeActive = fadeActive && (SamplePos > (GD->loopUpperBound - loopFade)) &&
-                         (SamplePos <= GD->loopUpperBound);
-        }
+        fadeActive = fadeRunningAt(SamplePos);
+        refreshReads(SamplePos, fadeActive);
     }
 
     // Clean up any items left
