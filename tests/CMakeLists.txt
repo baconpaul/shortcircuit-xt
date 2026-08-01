@@ -8,6 +8,7 @@ add_executable(scxt-test
 		sample_load.cpp
 		sample_fuzz.cpp
 		processors_and_fx.cpp
+		generator_tests.cpp
 
 		ui_basics.cpp
 
