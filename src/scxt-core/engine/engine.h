@@ -490,6 +490,9 @@ struct Engine : MoveableOnly<Engine>, SampleRateSupport
     std::atomic<uint32_t> activeVoices{0};
     uint64_t nextVoiceCreationId{1};
 
+    // flip-flops on each note on which starts voices, feeding the voice matrix 'Alternate' source
+    bool voiceAlternate{false};
+
     std::unique_ptr<voice::PreviewVoice> previewVoice;
 
     const std::unique_ptr<messaging::MessageController> &getMessageController() const
