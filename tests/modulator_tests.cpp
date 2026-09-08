@@ -512,3 +512,21 @@ TEST_CASE("Non-ONESHOT step LFO loops the sequence")
 
     REQUIRE(maxAbsOver(out, 2 * blocksPerSecond, 3 * blocksPerSecond) > 0.9f);
 }
+
+TEST_CASE("Only shape and trigger mode resend display data on an int16 mod storage edit")
+{
+    scxt::modulation::ModulatorStorage ms;
+
+    // the offset the UI puts in the message is the one the attachment computes this way
+    auto offsetOf = [&ms](const auto &m) {
+        return (ptrdiff_t)((const uint8_t *)&m - (const uint8_t *)&ms);
+    };
+
+    // the panel picks its sub pane off these two, so a change has to reach the client
+    REQUIRE(scxt::modulation::modStorageInt16EditRestructuresPanel(offsetOf(ms.modulatorShape)));
+    REQUIRE(scxt::modulation::modStorageInt16EditRestructuresPanel(offsetOf(ms.triggerMode)));
+
+    // step count is dragged, and a resend rebuilds the pane out from under the drag
+    REQUIRE(!scxt::modulation::modStorageInt16EditRestructuresPanel(
+        offsetOf(ms.stepLfoStorage.repeat)));
+}

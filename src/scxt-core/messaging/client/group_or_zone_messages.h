@@ -140,7 +140,6 @@ CLIENT_TO_SERIAL_CONSTRAINED(
                 eng.getSelectionManager()->sendDisplayDataForLeadSelection(std::get<0>(payload));
         }));
 
-// int updates can change shape. For now lets just always assume they do
 CLIENT_TO_SERIAL_CONSTRAINED(
     UpdateZoneOrGroupModStorageInt16TValue, c2s_update_zone_or_group_modstorage_int16_t_value,
     detail::indexedZoneOrGroupDiffMsg_t<int16_t>, modulation::ModulatorStorage,
@@ -148,6 +147,9 @@ CLIENT_TO_SERIAL_CONSTRAINED(
                                                 undo::GroupModStorageSpec>(
         &engine::Zone::modulatorStorage, &engine::Group::modulatorStorage, payload, engine, cont,
         [payload](auto &eng) {
+            if (!modulation::modStorageInt16EditRestructuresPanel(std::get<2>(payload)))
+                return;
+
             auto forZone = std::get<0>(payload);
             if (forZone)
             {

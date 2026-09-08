@@ -29,6 +29,7 @@
 #define SCXT_SRC_SCXT_CORE_MODULATION_MODULATOR_STORAGE_H
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 
 #include "sst/basic-blocks/modulators/StepLFO.h"
@@ -215,6 +216,13 @@ struct ModulatorStorage
 
     bool modulatorConsistent{true};
 };
+
+// only these restructure the panel; a resend on the others rebuilds the pane mid-drag
+inline bool modStorageInt16EditRestructuresPanel(ptrdiff_t offset)
+{
+    return offset == (ptrdiff_t)offsetof(ModulatorStorage, modulatorShape) ||
+           offset == (ptrdiff_t)offsetof(ModulatorStorage, triggerMode);
+}
 
 struct MiscSourceStorage
 {
