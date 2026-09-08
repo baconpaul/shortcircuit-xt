@@ -175,7 +175,7 @@ TEST_CASE("Selecting an empty group clears prior zone selections")
     th.sendToSerialization(cmsg::AddBlankZone({0, 0, 48, 60, 0, 127}));
     th.sendToSerialization(cmsg::AddBlankZone({0, 0, 61, 72, 0, 127}));
     th.sendToSerialization(cmsg::CreateGroup(0));
-    th.stepUI();
+    th.stepUI(30); // the adds and the group create hop the audio thread
 
     REQUIRE(sm->state[0].leadZone == zad{0, 0, 1});
     REQUIRE(!sm->state[0].selectedZones.empty());
@@ -393,7 +393,7 @@ TEST_CASE("Fold: delete-fixup drops the deleted group's fold bit and clamps out-
 
     // Delete the folded group 2. Group 2's bit is gone; group 4's bit shifts to 3.
     th.sendToSerialization(cmsg::DeleteGroup(zad{0, 2, -1}));
-    th.stepUI();
+    th.stepUI(30); // the delete and its fold fixup hop the audio thread
     REQUIRE(th.engine->getPatch()->getPart(0)->getGroups().size() == 4);
     REQUIRE(!sm->isGroupCollapsed(0, 2));
     REQUIRE(sm->isGroupCollapsed(0, 3));
