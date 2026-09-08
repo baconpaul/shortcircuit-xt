@@ -396,13 +396,14 @@ struct MatrixEndpoints
         struct VoiceSources
         {
             VoiceSources(engine::Engine *e)
-                : isGated{'zvsr', 'gate'}, isReleased{'zvsr', 'reld'},
+                : isGated{'zvsr', 'gate'}, isReleased{'zvsr', 'reld'}, alternate{'zvsr', 'altr'},
                   variantCount{'zvsr', 'vcnt', 0}, variantCountFraction{'zvsr', 'vcfr', 0},
                   loopPercentage{'zvsr', 'lppc', 0}, loopCount{'zvsr', 'lpct', 0},
                   isLooping{'zvsr', 'islp', 0}, samplePercentage{'zvsr', 'sppc', 0}
             {
                 registerVoiceModSource(e, isGated, "Voice", "Is Gated");
                 registerVoiceModSource(e, isReleased, "Voice", "Is Released");
+                registerVoiceModSource(e, alternate, "Voice", "Alternate");
                 registerVoiceModSource(e, variantCount, "Voice", "Variant Idx");
                 registerVoiceModSource(e, variantCountFraction, "Voice", "Variant %");
                 registerVoiceModSource(e, isLooping, "Voice", "Is Looping");
@@ -410,7 +411,7 @@ struct MatrixEndpoints
                 registerVoiceModSource(e, loopPercentage, "Voice", "Loop %");
                 registerVoiceModSource(e, loopCount, "Voice", "Loop Count");
             }
-            SR isGated, isReleased;
+            SR isGated, isReleased, alternate;
             SR variantCount, variantCountFraction;
             SR isLooping, loopPercentage, samplePercentage, loopCount;
         } voiceSources;

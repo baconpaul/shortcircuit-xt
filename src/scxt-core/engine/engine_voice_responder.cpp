@@ -103,6 +103,13 @@ int32_t Engine::VoiceManagerResponder::initializeMultipleVoices(
     // envelope on them can wait on the gate - see Voice::createdByReleaseTrigger
     auto byReleaseTrigger = engine.inReleaseTriggerPass;
 
+    // alternate flips once per note on rather than once per voice, so zones layered on one
+    // key all sound with the same value
+    auto alternateForNote = engine.voiceAlternate * 1.f;
+    auto assignAlternate = [&alternateForNote](voice::Voice *v) {
+        v->currentAlternate = alternateForNote;
+    };
+
     for (auto idx = 0; idx < nts; ++idx)
     {
         if (voiceInstructionBuffer[idx].instruction ==
@@ -131,6 +138,7 @@ int32_t Engine::VoiceManagerResponder::initializeMultipleVoices(
                 v->originalMidiKey = key;
 
                 v->createdByReleaseTrigger = byReleaseTrigger;
+                assignAlternate(v);
                 v->attack();
                 glideFromPriorVoice(v, idx);
 
@@ -164,6 +172,7 @@ int32_t Engine::VoiceManagerResponder::initializeMultipleVoices(
 
                     v->originalMidiKey = key;
                     v->createdByReleaseTrigger = byReleaseTrigger;
+                    assignAlternate(v);
                     v->attack();
                     glideFromPriorVoice(v, idx);
 
@@ -244,6 +253,9 @@ int32_t Engine::VoiceManagerResponder::initializeMultipleVoices(
             ov->beginTerminationSequence();
         }
     }
+
+    if (actualCreated > 0)
+        engine.voiceAlternate = !engine.voiceAlternate;
 
     engine.midiNoteStateCounter++;
     SCLOG_IF(voiceResponder, "Completed voice initiation " << actualCreated << " of " << nts);

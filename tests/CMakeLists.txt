@@ -16,6 +16,7 @@ add_executable(scxt-test
 		modify_structure.cpp
 		modulator_tests.cpp
 		mod_matrix_operations_tests.cpp
+		alternate_source_tests.cpp
 		exclusive_group_tests.cpp
 		keyswitch_tests.cpp
 		group_trigger_tests.cpp
