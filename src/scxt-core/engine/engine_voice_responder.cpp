@@ -103,11 +103,13 @@ int32_t Engine::VoiceManagerResponder::initializeMultipleVoices(
     // envelope on them can wait on the gate - see Voice::createdByReleaseTrigger
     auto byReleaseTrigger = engine.inReleaseTriggerPass;
 
-    // alternate flips once per note on rather than once per voice, so zones layered on one
-    // key all sound with the same value
-    auto alternateForNote = engine.voiceAlternate * 1.f;
+    // the alternates step once per note on rather than once per voice, so zones layered on
+    // one key all sound with the same value
+    auto alternateForNote = engine.voiceAlternateCounter;
     auto assignAlternate = [&alternateForNote](voice::Voice *v) {
-        v->currentAlternate = alternateForNote;
+        v->currentAlternate = (alternateForNote % 2) * 1.f;
+        v->currentAlternateBipolar = (alternateForNote % 2) * 2.f - 1.f;
+        v->currentAlternateRotation = (alternateForNote % 3) * 1.f - 1.f;
     };
 
     for (auto idx = 0; idx < nts; ++idx)
@@ -255,7 +257,8 @@ int32_t Engine::VoiceManagerResponder::initializeMultipleVoices(
     }
 
     if (actualCreated > 0)
-        engine.voiceAlternate = !engine.voiceAlternate;
+        engine.voiceAlternateCounter =
+            (engine.voiceAlternateCounter + 1) % Engine::voiceAlternateCycle;
 
     engine.midiNoteStateCounter++;
     SCLOG_IF(voiceResponder, "Completed voice initiation " << actualCreated << " of " << nts);

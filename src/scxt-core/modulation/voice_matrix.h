@@ -395,23 +395,35 @@ struct MatrixEndpoints
 
         struct VoiceSources
         {
+            // a nested category, so the three alternates get their own submenu under Voice
+            static constexpr const char *alternates{"Voice/Alternates"};
+
             VoiceSources(engine::Engine *e)
                 : isGated{'zvsr', 'gate'}, isReleased{'zvsr', 'reld'}, alternate{'zvsr', 'altr'},
+                  alternateBipolar{'zvsr', 'altb'}, alternateRotation{'zvsr', 'alt3'},
                   variantCount{'zvsr', 'vcnt', 0}, variantCountFraction{'zvsr', 'vcfr', 0},
                   loopPercentage{'zvsr', 'lppc', 0}, loopCount{'zvsr', 'lpct', 0},
                   isLooping{'zvsr', 'islp', 0}, samplePercentage{'zvsr', 'sppc', 0}
             {
                 registerVoiceModSource(e, isGated, "Voice", "Is Gated");
                 registerVoiceModSource(e, isReleased, "Voice", "Is Released");
-                registerVoiceModSource(e, alternate, "Voice", "Alternate");
                 registerVoiceModSource(e, variantCount, "Voice", "Variant Idx");
                 registerVoiceModSource(e, variantCountFraction, "Voice", "Variant %");
                 registerVoiceModSource(e, isLooping, "Voice", "Is Looping");
                 registerVoiceModSource(e, samplePercentage, "Voice", "Sample %");
                 registerVoiceModSource(e, loopPercentage, "Voice", "Loop %");
                 registerVoiceModSource(e, loopCount, "Voice", "Loop Count");
+
+                {
+                    // narrowest to widest rather than alphabetical
+                    auto orderGuard = scxt::modulation::shared::ExplicitMenuOrder(e);
+                    registerVoiceModSource(e, alternate, alternates, "0/1 Alternate");
+                    registerVoiceModSource(e, alternateBipolar, alternates, "+/-1 Alternate");
+                    registerVoiceModSource(e, alternateRotation, alternates, "-1/0/1 Rotation");
+                }
             }
-            SR isGated, isReleased, alternate;
+            SR isGated, isReleased;
+            SR alternate, alternateBipolar, alternateRotation;
             SR variantCount, variantCountFraction;
             SR isLooping, loopPercentage, samplePercentage, loopCount;
         } voiceSources;
