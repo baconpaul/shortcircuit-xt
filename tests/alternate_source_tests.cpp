@@ -26,15 +26,16 @@
  */
 
 /*
- * The 'Alternate' voice modulation source - a flip flop which hands each note on 0, then 1,
- * then 0 again. It flips per note on rather than per voice, so zones layered on one key all
- * sound with the same value. The flag lives on the engine, so the alternation is global
- * rather than per zone or per key, and a legato retrigger keeps what its voice was born with.
- * GH #2647.
+ * The three Alternate voice modulation sources - a 0/1 flip flop, its bipolar twin, and a
+ * -1/0/1 rotation. All three come off one engine counter which steps on each note on that
+ * starts voices, so they are global rather than per zone or per key, they step per note on
+ * rather than per voice (zones layered on one key sound with the same value), and a legato
+ * retrigger keeps what its voice was born with. GH #2647.
  */
 
 #include "catch2/catch2.hpp"
 
+#include <algorithm>
 #include <memory>
 #include <vector>
 
@@ -53,6 +54,11 @@
 namespace
 {
 namespace vm = scxt::voice::modulation;
+
+// what each source should read on the nth note on of a fresh engine
+float expectedAlternate(int n) { return (n % 2) * 1.f; }
+float expectedBipolar(int n) { return (n % 2) * 2.f - 1.f; }
+float expectedRotation(int n) { return (n % 3) * 1.f - 1.f; }
 
 // The voice the most recent note on made in this zone. Released voices linger, so "newest"
 // has to come off the creation id rather than the first assigned slot.
@@ -77,26 +83,26 @@ scxt::engine::Zone &oneZoneOnKey(scxt::engine::Engine &eng, int key)
 }
 } // namespace
 
-TEST_CASE("Alternate flips on every note on", "[modulation]")
+TEST_CASE("Alternates step on every note on", "[modulation]")
 {
     std::unique_ptr<scxt::engine::Engine> eng(makeEngine());
     auto &zone = oneZoneOnKey(*eng, 60);
 
-    std::vector<float> alts;
-    for (int i = 0; i < 8; ++i)
+    // twelve presses so the 6 state counter wraps twice and the 2 and 3 cycles have to come
+    // back into phase across the wrap
+    for (int i = 0; i < 12; ++i)
     {
         eng->processNoteOnEvent(0, 0, 60, -1, 1.f, 0.f);
         const auto *v = newestVoice(zone);
         REQUIRE(v);
-        alts.push_back(v->currentAlternate);
+        REQUIRE(v->currentAlternate == expectedAlternate(i));
+        REQUIRE(v->currentAlternateBipolar == expectedBipolar(i));
+        REQUIRE(v->currentAlternateRotation == expectedRotation(i));
         eng->processNoteOffEvent(0, 0, 60, -1, 0.f);
     }
-
-    for (int i = 0; i < (int)alts.size(); ++i)
-        REQUIRE(alts[i] == ((i % 2) ? 1.f : 0.f));
 }
 
-TEST_CASE("Alternate does not restart per key", "[modulation]")
+TEST_CASE("Alternates do not restart per key", "[modulation]")
 {
     std::unique_ptr<scxt::engine::Engine> eng(makeEngine());
     auto &part = *eng->getPatch()->getPart(0);
@@ -104,20 +110,20 @@ TEST_CASE("Alternate does not restart per key", "[modulation]")
     addBlankZoneToGroup(part, 0, 48, 72);
     auto &zone = *part.getGroup(0)->getZone(0);
 
-    std::vector<float> alts;
-    for (auto key : {60, 62, 64, 60, 67})
+    int n{0};
+    for (auto key : {60, 62, 64, 60, 67, 55, 60})
     {
         eng->processNoteOnEvent(0, 0, key, -1, 1.f, 0.f);
         const auto *v = newestVoice(zone);
         REQUIRE(v);
-        alts.push_back(v->currentAlternate);
+        REQUIRE(v->currentAlternate == expectedAlternate(n));
+        REQUIRE(v->currentAlternateRotation == expectedRotation(n));
         eng->processNoteOffEvent(0, 0, key, -1, 0.f);
+        n++;
     }
-
-    REQUIRE(alts == std::vector<float>{0.f, 1.f, 0.f, 1.f, 0.f});
 }
 
-TEST_CASE("Alternate is shared by zones layered on one key", "[modulation]")
+TEST_CASE("Alternates are shared by zones layered on one key", "[modulation]")
 {
     std::unique_ptr<scxt::engine::Engine> eng(makeEngine());
     auto &part = *eng->getPatch()->getPart(0);
@@ -128,57 +134,82 @@ TEST_CASE("Alternate is shared by zones layered on one key", "[modulation]")
     auto &upper = *part.getGroup(0)->getZone(1);
 
     // both zones on a press get the same value, and it advances press to press: 00 11 00 11
-    for (int i = 0; i < 4; ++i)
+    for (int i = 0; i < 6; ++i)
     {
         eng->processNoteOnEvent(0, 0, 60, -1, 1.f, 0.f);
         const auto *lv = newestVoice(lower);
         const auto *uv = newestVoice(upper);
         REQUIRE(lv);
         REQUIRE(uv);
-        REQUIRE(lv->currentAlternate == ((i % 2) ? 1.f : 0.f));
+        REQUIRE(lv->currentAlternate == expectedAlternate(i));
+        REQUIRE(lv->currentAlternateRotation == expectedRotation(i));
         REQUIRE(uv->currentAlternate == lv->currentAlternate);
+        REQUIRE(uv->currentAlternateRotation == lv->currentAlternateRotation);
         eng->processNoteOffEvent(0, 0, 60, -1, 0.f);
     }
 }
 
-TEST_CASE("Alternate reaches the voice matrix", "[modulation]")
+TEST_CASE("Alternates reach the voice matrix", "[modulation]")
 {
-    std::unique_ptr<scxt::engine::Engine> eng(makeEngine());
-    auto &zone = oneZoneOnKey(*eng, 60);
-
-    // an empty zone's voice ends on its first block - no generator, no procs - so give it
-    // an oscillator to sustain through the block that runs the matrix
-    {
-        auto bypass = eng->getMessageController()->threadingChecker.bypassChecksInScope();
-        zone.setProcessorType(0, scxt::dsp::processor::proct_osc_sineplus);
-    }
-
     const auto panT = vm::MatrixConfig::TargetIdentifier{'zout', 'pan ', 0};
 
-    auto &row = zone.routingTable.routes[0];
-    row.active = true;
-    row.source = vm::sourcesForScanning().voiceSources.alternate;
-    row.target = panT;
-    row.depth = 1.f;
+    // route one source at full depth to zone pan and report the modulated pan on each of the
+    // first two presses. Pan is clamped to its own range so only the sign is asserted below.
+    auto firstTwoPans = [&panT](const vm::MatrixConfig::SourceIdentifier &src) {
+        std::unique_ptr<scxt::engine::Engine> eng(makeEngine());
+        auto &zone = oneZoneOnKey(*eng, 60);
 
-    auto panAfterPress = [&]() {
-        eng->processNoteOnEvent(0, 0, 60, -1, 1.f, 0.f);
-        eng->processAudio();
-        const auto *v = newestVoice(zone);
-        REQUIRE(v);
-        auto p = v->modMatrix->getTargetValue(panT);
-        eng->processNoteOffEvent(0, 0, 60, -1, 0.f);
-        return p;
+        // an empty zone's voice ends on its first block - no generator, no procs - so give it
+        // an oscillator to sustain through the block that runs the matrix
+        {
+            auto bypass = eng->getMessageController()->threadingChecker.bypassChecksInScope();
+            zone.setProcessorType(0, scxt::dsp::processor::proct_osc_sineplus);
+        }
+
+        auto &row = zone.routingTable.routes[0];
+        row.active = true;
+        row.source = src;
+        row.target = panT;
+        row.depth = 1.f;
+
+        std::vector<float> pans;
+        for (int i = 0; i < 2; ++i)
+        {
+            eng->processNoteOnEvent(0, 0, 60, -1, 1.f, 0.f);
+            eng->processAudio();
+            const auto *v = newestVoice(zone);
+            REQUIRE(v);
+            pans.push_back(v->modMatrix->getTargetValue(panT));
+            eng->processNoteOffEvent(0, 0, 60, -1, 0.f);
+        }
+        return pans;
     };
 
-    auto pOff = panAfterPress();
-    auto pOn = panAfterPress();
+    const auto &srcs = vm::sourcesForScanning().voiceSources;
 
-    REQUIRE(pOff == Approx(0.f));
-    REQUIRE(pOn > 0.1f);
+    SECTION("0/1 alternate goes 0 then positive")
+    {
+        auto p = firstTwoPans(srcs.alternate);
+        REQUIRE(p[0] == Approx(0.f));
+        REQUIRE(p[1] > 0.1f);
+    }
+
+    SECTION("+/-1 alternate goes negative then positive")
+    {
+        auto p = firstTwoPans(srcs.alternateBipolar);
+        REQUIRE(p[0] < -0.1f);
+        REQUIRE(p[1] > 0.1f);
+    }
+
+    SECTION("-1/0/1 rotation goes negative then 0")
+    {
+        auto p = firstTwoPans(srcs.alternateRotation);
+        REQUIRE(p[0] < -0.1f);
+        REQUIRE(p[1] == Approx(0.f));
+    }
 }
 
-TEST_CASE("Alternate is offered as a voice source", "[modulation]")
+TEST_CASE("Alternates are offered in their own submenu", "[modulation]")
 {
     std::unique_ptr<scxt::engine::Engine> eng(makeEngine());
     auto &zone = oneZoneOnKey(*eng, 60);
@@ -186,9 +217,30 @@ TEST_CASE("Alternate is offered as a voice source", "[modulation]")
     auto md = vm::getVoiceMatrixMetadata(zone);
     const auto &sources = std::get<1>(md);
 
-    auto found = std::find_if(sources.begin(), sources.end(), [](const auto &s) {
-        return s.second.first == "Voice" && s.second.second == "Alternate";
-    });
-    REQUIRE(found != sources.end());
-    REQUIRE(found->first == vm::sourcesForScanning().voiceSources.alternate);
+    std::vector<std::string> inAlternates;
+    for (const auto &[si, sn] : sources)
+        if (sn.first == "Voice/Alternates")
+            inAlternates.push_back(sn.second);
+
+    // the menu order is pinned rather than alphabetical, narrowest range first
+    REQUIRE(inAlternates ==
+            std::vector<std::string>{"0/1 Alternate", "+/-1 Alternate", "-1/0/1 Rotation"});
+
+    auto idFor = [&sources](const std::string &name) {
+        auto it = std::find_if(sources.begin(), sources.end(), [&name](const auto &s) {
+            return s.second.first == "Voice/Alternates" && s.second.second == name;
+        });
+        REQUIRE(it != sources.end());
+        return it->first;
+    };
+
+    const auto &srcs = vm::sourcesForScanning().voiceSources;
+    REQUIRE(idFor("0/1 Alternate") == srcs.alternate);
+    REQUIRE(idFor("+/-1 Alternate") == srcs.alternateBipolar);
+    REQUIRE(idFor("-1/0/1 Rotation") == srcs.alternateRotation);
+
+    // nothing left behind at the old flat path
+    auto stale = std::find_if(sources.begin(), sources.end(),
+                              [](const auto &s) { return s.second.second == "Alternate"; });
+    REQUIRE(stale == sources.end());
 }

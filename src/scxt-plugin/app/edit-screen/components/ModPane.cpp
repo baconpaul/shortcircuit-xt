@@ -47,6 +47,70 @@ namespace cmsg = scxt::messaging::client;
 namespace jcmp = sst::jucegui::components;
 namespace jcad = sst::jucegui::component_adapters;
 
+/*
+ * A source category can nest - "Voice/Alternates" hangs an Alternates submenu inside Voice - so
+ * the menu is built against a stack of open submenus rather than one run of a single category.
+ * Sources arrive sorted with a category contiguous, so a level is only reopened if its path
+ * actually reappears.
+ */
+struct NestedSourceMenu
+{
+    struct Level
+    {
+        std::string name;
+        juce::PopupMenu menu;
+        bool ticked{false};
+    };
+
+    juce::PopupMenu &top;
+    std::vector<Level> open;
+
+    explicit NestedSourceMenu(juce::PopupMenu &t) : top(t) {}
+    ~NestedSourceMenu() { closeTo(0); }
+
+    void addItem(const std::string &path, const std::string &name, bool ticked,
+                 std::function<void()> cb)
+    {
+        std::vector<std::string> segs;
+        size_t pos{0};
+        while (pos < path.size())
+        {
+            auto nxt = path.find('/', pos);
+            if (nxt == std::string::npos)
+                nxt = path.size();
+            if (nxt > pos)
+                segs.push_back(path.substr(pos, nxt - pos));
+            pos = nxt + 1;
+        }
+
+        size_t common{0};
+        while (common < open.size() && common < segs.size() && open[common].name == segs[common])
+            common++;
+        closeTo(common);
+
+        for (auto i = common; i < segs.size(); ++i)
+            open.push_back(Level{segs[i], juce::PopupMenu(), false});
+
+        currentMenu().addItem(name, true, ticked, cb);
+        if (ticked)
+            for (auto &l : open)
+                l.ticked = true;
+    }
+
+    juce::PopupMenu &currentMenu() { return open.empty() ? top : open.back().menu; }
+
+    void closeTo(size_t depth)
+    {
+        while (open.size() > depth)
+        {
+            auto lvl = std::move(open.back());
+            open.pop_back();
+            if (lvl.menu.getNumItems() > 0)
+                currentMenu().addSubMenu(lvl.name, lvl.menu, true, nullptr, lvl.ticked);
+        }
+    }
+};
+
 template <typename GZTrait> struct ModRow : juce::Component, HasEditor, juce::DragAndDropTarget
 {
     int index{0};
@@ -539,47 +603,29 @@ template <typename GZTrait> struct ModRow : juce::Component, HasEditor, juce::Dr
         if (hasCat)
             p.addSeparator();
 
-        auto sub = juce::PopupMenu();
         std::string sourceName{""};
-        auto subTicked{false};
-        std::string lastCat{};
-        for (const auto &[si, sn] : srcs)
         {
-            if (sn.first.empty())
-                continue;
-
-            if (lastCat != sn.first)
+            auto nested = NestedSourceMenu(p);
+            for (const auto &[si, sn] : srcs)
             {
-                if (sub.getNumItems() > 0)
+                if (sn.first.empty())
+                    continue;
+
+                const auto &row = parent->routingTable.routes[index];
+                auto selected = isVia ? (row.sourceVia == si) : (row.source == si);
+
+                auto nm = sn.second;
+                if (si.gid == 'gmac' || si.gid == 'zmac')
                 {
-                    p.addSubMenu(lastCat, sub, true, nullptr, subTicked);
+                    if (nm != scxt::engine::Macro::defaultNameFor(si.index))
+                    {
+                        nm = scxt::engine::Macro::defaultNameFor(si.index) + " (" + nm + ")";
+                    }
                 }
-                sub = juce::PopupMenu();
-                lastCat = sn.first;
-                subTicked = false;
+                nested.addItem(sn.first, nm, selected, mkCallback(si));
+                if (selected)
+                    sourceName = nm;
             }
-
-            const auto &row = parent->routingTable.routes[index];
-            auto selected = isVia ? (row.sourceVia == si) : (row.source == si);
-            if (selected)
-                subTicked = true;
-
-            auto nm = sn.second;
-            if (si.gid == 'gmac' || si.gid == 'zmac')
-            {
-                if (nm != scxt::engine::Macro::defaultNameFor(si.index))
-                {
-                    nm = scxt::engine::Macro::defaultNameFor(si.index) + " (" + nm + ")";
-                }
-            }
-            sub.addItem(nm, true, selected, mkCallback(si));
-            if (selected)
-                sourceName = nm;
-        }
-
-        if (sub.getNumItems() > 0)
-        {
-            p.addSubMenu(lastCat, sub, true, nullptr, subTicked);
         }
 
         const auto &row = parent->routingTable.routes[index];

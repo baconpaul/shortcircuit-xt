@@ -301,8 +301,8 @@ struct alignas(16) Voice : MoveableOnly<Voice>,
         isReleasedF = g ? 0.f : 1.f;
     };
 
-    // set from the note on which started this voice; a legato retrigger keeps that value
-    float currentAlternate{0.f};
+    // set from the note on which started this voice; a legato retrigger keeps those values
+    float currentAlternate{0.f}, currentAlternateBipolar{-1.f}, currentAlternateRotation{-1.f};
 
     std::array<bool, maxGeneratorsPerVoice> isGeneratorRunning{};
     bool isAnyGeneratorRunning{};

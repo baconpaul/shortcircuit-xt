@@ -490,8 +490,10 @@ struct Engine : MoveableOnly<Engine>, SampleRateSupport
     std::atomic<uint32_t> activeVoices{0};
     uint64_t nextVoiceCreationId{1};
 
-    // flip-flops on each note on which starts voices, feeding the voice matrix 'Alternate' source
-    bool voiceAlternate{false};
+    // steps on each note on which starts voices, feeding the voice matrix Alternate sources.
+    // 6 states so the 2 cycle and the 3 cycle alternates stay in phase across the wrap.
+    int32_t voiceAlternateCounter{0};
+    static constexpr int32_t voiceAlternateCycle{6};
 
     std::unique_ptr<voice::PreviewVoice> previewVoice;
 
