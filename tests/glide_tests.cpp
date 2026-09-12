@@ -30,6 +30,7 @@
 #include <filesystem>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "engine/engine.h"
 #include "engine/part.h"
@@ -58,16 +59,18 @@ namespace
 constexpr float SLOW_GLIDE = 0.3f;
 
 /*
- * One part / one group / one zone spanning the keys we play, driven directly on the
+ * One part / one group / n zones all spanning the keys we play, driven directly on the
  * test thread (no ConsoleHarness, no audio thread) exactly like exclusive_group_tests.
+ * With n > 1 the zones layer, so one note-on makes one voice per zone.
  */
 struct GlideFixture
 {
     std::unique_ptr<scxt::engine::Engine> eng;
     scxt::engine::Group *group{nullptr};
     scxt::engine::Zone *zone{nullptr};
+    std::vector<scxt::engine::Zone *> zones;
 
-    explicit GlideFixture(bool withSample)
+    explicit GlideFixture(bool withSample, int zoneCount = 1)
     {
         eng = std::make_unique<scxt::engine::Engine>();
         eng->prepareToPlay(TEST_SAMPLE_RATE);
@@ -78,18 +81,22 @@ struct GlideFixture
         part.addGroup();
         group = part.getGroup(0).get();
 
-        auto z = std::make_unique<scxt::engine::Zone>();
-        z->mapping.keyboardRange = {48, 84};
-        z->mapping.velocityRange = {0, 127};
-        z->mapping.rootKey = 60;
-        z->initialize();
-        group->addZone(z);
-        zone = group->getZone(0).get();
+        for (int i = 0; i < zoneCount; ++i)
+        {
+            auto z = std::make_unique<scxt::engine::Zone>();
+            z->mapping.keyboardRange = {48, 84};
+            z->mapping.velocityRange = {0, 127};
+            z->mapping.rootKey = 60;
+            z->initialize();
+            group->addZone(z);
+            zones.push_back(group->getZone(i).get());
 
-        if (withSample)
-            loadSample();
-        else
-            addOscillator();
+            if (withSample)
+                loadSample(zones.back());
+            else
+                addOscillator(zones.back());
+        }
+        zone = zones.front();
     }
 
     /*
@@ -97,13 +104,13 @@ struct GlideFixture
      * processor the voice ends on its first block (no generator, no procs). An oscillator
      * is also what "empty zone as a VA synth" actually means in practice.
      */
-    void addOscillator()
+    void addOscillator(scxt::engine::Zone *z)
     {
         auto bypass = eng->getMessageController()->threadingChecker.bypassChecksInScope();
-        zone->setProcessorType(0, scxt::dsp::processor::proct_osc_sineplus);
+        z->setProcessorType(0, scxt::dsp::processor::proct_osc_sineplus);
     }
 
-    void loadSample()
+    void loadSample(scxt::engine::Zone *z)
     {
         auto p = samplePath("WavStereo48k.wav");
         REQUIRE(fs::exists(p));
@@ -113,12 +120,12 @@ struct GlideFixture
         auto sid = eng->getSampleManager()->loadSampleByPath(p);
         REQUIRE(sid.has_value());
 
-        zone->variantData.variants[0].sampleID = *sid;
-        zone->variantData.variants[0].active = true;
+        z->variantData.variants[0].sampleID = *sid;
+        z->variantData.variants[0].active = true;
         // ENDPOINTS only — MAPPING would let the wav's chunks overwrite our key range.
-        REQUIRE(zone->attachToSample(*eng->getSampleManager(), 0,
-                                     scxt::engine::Zone::SampleInformationRead::ENDPOINTS));
-        REQUIRE(zone->getNumSampleLoaded() == 1);
+        REQUIRE(z->attachToSample(*eng->getSampleManager(), 0,
+                                  scxt::engine::Zone::SampleInformationRead::ENDPOINTS));
+        REQUIRE(z->getNumSampleLoaded() == 1);
     }
 
     void setMonoWithGlide(float glideTime)
@@ -138,17 +145,27 @@ struct GlideFixture
             eng->processAudio();
     }
 
-    // The live (non-choked) voice sounding a given key, or nullptr.
+    // Every live (non-choked) voice sounding a given key, across all the layered zones.
+    std::vector<scxt::voice::Voice *> voicesForKey(int key) const
+    {
+        std::vector<scxt::voice::Voice *> res;
+        for (auto *z : zones)
+        {
+            for (int i = 0; i < (int)scxt::maxVoices; ++i)
+            {
+                auto *v = z->voiceWeakPointers[i];
+                if (v && v->isVoiceAssigned && v->isVoicePlaying && v->terminationSequence < 0 &&
+                    (int)v->key == key)
+                    res.push_back(v);
+            }
+        }
+        return res;
+    }
+
     scxt::voice::Voice *voiceForKey(int key) const
     {
-        for (int i = 0; i < (int)scxt::maxVoices; ++i)
-        {
-            auto *v = zone->voiceWeakPointers[i];
-            if (v && v->isVoiceAssigned && v->isVoicePlaying && v->terminationSequence < 0 &&
-                (int)v->key == key)
-                return v;
-        }
-        return nullptr;
+        auto vs = voicesForKey(key);
+        return vs.empty() ? nullptr : vs.front();
     }
 };
 
@@ -246,4 +263,69 @@ TEST_CASE("Mono glide on release back to a held key - sampled zone", "[glide]")
 
     f.runBlocks(300);
     CHECK(back->pitchFloat == Approx(60.f).margin(0.01f));
+}
+
+TEST_CASE("Mono glide moves every layered voice", "[glide]")
+{
+    /*
+     * #2565: two zones layered on one key make two voices in the mono group, but the
+     * voice manager only tagged the first launch entry with continuation data, so the
+     * second zone snapped to the new key while the first glided.
+     */
+    GlideFixture f{true, 2};
+    f.setMonoWithGlide(SLOW_GLIDE);
+
+    f.noteOn(60);
+    f.runBlocks(20);
+    REQUIRE(f.voicesForKey(60).size() == 2);
+
+    f.noteOn(72);
+    f.runBlocks(1);
+
+    auto vs = f.voicesForKey(72);
+    REQUIRE(vs.size() == 2);
+    for (auto *v : vs)
+    {
+        INFO("startPitch=" << v->pitchFloat);
+        CHECK(v->inGlide);
+        CHECK(v->pitchFloat < 62.f);
+        CHECK(v->pitchFloat > 59.f);
+    }
+
+    f.runBlocks(300);
+    for (auto *v : vs)
+    {
+        CHECK(v->pitchFloat == Approx(72.f).margin(0.01f));
+        CHECK_FALSE(v->inGlide);
+    }
+}
+
+TEST_CASE("Mono glide on release moves every layered voice", "[glide]")
+{
+    // Same layering through doMonoRetrigger: release the top note back onto a held one.
+    GlideFixture f{true, 2};
+    f.setMonoWithGlide(SLOW_GLIDE);
+
+    f.noteOn(60);
+    f.runBlocks(20);
+    f.noteOn(72);
+    f.runBlocks(300);
+    REQUIRE(f.voicesForKey(72).size() == 2);
+
+    f.noteOff(72);
+    f.runBlocks(1);
+
+    auto vs = f.voicesForKey(60);
+    REQUIRE(vs.size() == 2);
+    for (auto *v : vs)
+    {
+        INFO("pitch=" << v->pitchFloat);
+        CHECK(v->inGlide);
+        CHECK(v->pitchFloat > 70.f);
+        CHECK(v->pitchFloat < 73.f);
+    }
+
+    f.runBlocks(300);
+    for (auto *v : vs)
+        CHECK(v->pitchFloat == Approx(60.f).margin(0.01f));
 }
