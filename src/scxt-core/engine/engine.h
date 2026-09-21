@@ -139,9 +139,23 @@ struct Engine : MoveableOnly<Engine>, SampleRateSupport
      * press rather than being handed a voice it never saw start.
      */
     HeldNotes heldNotes;
-    bool inReleaseTriggerPass{false};
+    // which groups the voice manager's current note on is asking for voices from
+    VoiceCreationMode voiceCreationPass{VoiceCreationMode::ON_NOTE_ON};
+    bool inReleaseTriggerPass() const
+    {
+        return voiceCreationPass == VoiceCreationMode::ON_NOTE_OFF;
+    }
     void fireReleaseTriggers(int16_t port, int16_t channel, int16_t key, int32_t note_id);
     bool anyGroupCreatesVoicesOnRelease() const;
+
+    // advances once per audio block; press times are measured against it
+    uint64_t samplesProcessed{0};
+    double secondsSince(uint64_t sampleCount) const
+    {
+        return (double)(samplesProcessed - sampleCount) * sampleRateInv;
+    }
+    // how long the key behind the voices now being made was held
+    double ungatedPassHeldSeconds{0.0};
 
     struct pathToZone_t
     {
@@ -190,7 +204,7 @@ struct Engine : MoveableOnly<Engine>, SampleRateSupport
                  * settles it for both passes - a release group reads back the slot its own
                  * note-on chose rather than spending a second one on the way up.
                  */
-                if (!inReleaseTriggerPass)
+                if (!inReleaseTriggerPass())
                     part->advanceRoundRobinSets(
                         *this, part->roundRobinSetsForNote(*this, channel, key, midiKey, velocity,
                                                            (int16_t)kt));
@@ -221,7 +235,7 @@ struct Engine : MoveableOnly<Engine>, SampleRateSupport
                              * press put it - but it is still a switch key, so it is consumed
                              * either way rather than sounding anybody.
                              */
-                            if (!inReleaseTriggerPass)
+                            if (!inReleaseTriggerPass())
                             {
                                 bool changed{false};
                                 // This second iteration is a wee bit annoying but
@@ -278,7 +292,7 @@ struct Engine : MoveableOnly<Engine>, SampleRateSupport
                      * passes need the same answer. Only voice creation splits: the press makes
                      * voices for note-on groups, the release for release groups.
                      */
-                    if (group->triggerConditions.createsVoicesOnRelease() != inReleaseTriggerPass)
+                    if (group->triggerConditions.voiceCreationMode != voiceCreationPass)
                         continue;
 
                     for (const auto &[zidx, zone] : sst::cpputils::enumerate(*group))

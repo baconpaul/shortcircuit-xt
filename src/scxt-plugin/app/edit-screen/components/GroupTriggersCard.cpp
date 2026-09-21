@@ -35,6 +35,7 @@
 #include "sst/jucegui/components/MenuButton.h"
 #include "sst/jucegui/components/DraggableTextEditableValue.h"
 #include "sst/jucegui/components/DraggableTextEditableDiscreteValue.h"
+#include "sst/jucegui/components/Label.h"
 #include "sst/jucegui/component-adapters/DiscreteToReference.h"
 
 #include "app/SCXTEditor.h"
@@ -399,17 +400,19 @@ struct GroupTriggersCard::ConditionRow : juce::Component, HasEditor
     std::unique_ptr<learnToggle_t> learnB;
 };
 /*
- * Just the toggle and its attachment. Nested and defined here for the same reason ConditionRow
- * is - it keeps the attachment types out of the header.
+ * The release toggle and, once it is on, the countdown behind it. Nested and defined here for
+ * the same reason ConditionRow is - it keeps the attachment types out of the header.
  */
 struct GroupTriggersCard::ReleaseRow
 {
     using booleanAttachment_t =
         connectors::BooleanPayloadDataAttachment<scxt::engine::GroupTriggerConditions>;
+    using floatAttachment_t =
+        connectors::PayloadDataAttachment<scxt::engine::GroupTriggerConditions>;
 
     ReleaseRow(GroupTriggersCard *p) : parent(p)
     {
-        attachment = std::make_unique<booleanAttachment_t>(
+        releaseA = std::make_unique<booleanAttachment_t>(
             "Release Trigger",
             [w = juce::Component::SafePointer(p)](const auto &a) {
                 if (!w)
@@ -417,25 +420,67 @@ struct GroupTriggersCard::ReleaseRow
                 w->cond.voiceCreationMode = w->releaseTriggerOn
                                                 ? engine::VoiceCreationMode::ON_NOTE_OFF
                                                 : engine::VoiceCreationMode::ON_NOTE_ON;
+                w->releaseRow->setupValuesFromData();
                 w->pushUpdate();
             },
             p->releaseTriggerOn);
+        releaseB = std::make_unique<jcmp::ToggleButton>();
+        releaseB->setLabel("RELEASE TRIGGER");
+        releaseB->setSource(releaseA.get());
+        p->addAndMakeVisible(*releaseB);
 
-        button = std::make_unique<jcmp::ToggleButton>();
-        button->setLabel("RELEASE TRIGGER");
-        button->setSource(attachment.get());
-        p->addAndMakeVisible(*button);
+        auto md = datamodel::pmd()
+                      .asFloat()
+                      .withName("Release Countdown")
+                      .withRange(0, 30)
+                      .withLinearScaleFormatting("s")
+                      .withDecimalPlaces(2)
+                      .withDefault(engine::GroupTriggerConditions::defaultReleaseCountdownSeconds);
+        countdownA = std::make_unique<floatAttachment_t>(
+            md,
+            [w = juce::Component::SafePointer(p)](const auto &a) {
+                if (w)
+                    w->pushUpdate();
+            },
+            p->cond.releaseCountdownSeconds);
+        countdownM = std::make_unique<jcmp::DraggableTextEditableValue>();
+        countdownM->setSource(countdownA.get());
+        p->addChildComponent(*countdownM);
+
+        countdownL = std::make_unique<jcmp::Label>();
+        countdownL->setText("COUNTDOWN");
+        countdownL->setJustification(juce::Justification::centredRight);
+        p->addChildComponent(*countdownL);
     }
 
     void setupValuesFromData()
     {
         parent->releaseTriggerOn = parent->cond.createsVoicesOnRelease();
-        button->repaint();
+
+        // the countdown only means something once voices are made on release
+        countdownM->setVisible(parent->releaseTriggerOn);
+        countdownL->setVisible(parent->releaseTriggerOn);
+
+        releaseB->repaint();
+        countdownM->repaint();
+    }
+
+    void setBounds(const juce::Rectangle<int> &b, int rowHeight, int componentHeight)
+    {
+        auto r = b.withHeight(componentHeight);
+        releaseB->setBounds(r);
+
+        r = r.translated(0, rowHeight);
+        countdownM->setBounds(r.withTrimmedLeft(r.getWidth() - 48));
+        countdownL->setBounds(r.withTrimmedLeft(68).withTrimmedRight(52));
     }
 
     GroupTriggersCard *parent{nullptr};
-    std::unique_ptr<booleanAttachment_t> attachment;
-    std::unique_ptr<jcmp::ToggleButton> button;
+    std::unique_ptr<booleanAttachment_t> releaseA;
+    std::unique_ptr<jcmp::ToggleButton> releaseB;
+    std::unique_ptr<floatAttachment_t> countdownA;
+    std::unique_ptr<jcmp::DraggableTextEditableValue> countdownM;
+    std::unique_ptr<jcmp::Label> countdownL;
 };
 
 GroupTriggersCard::GroupTriggersCard(SCXTEditor *e) : HasEditor(e)
@@ -461,7 +506,7 @@ void GroupTriggersCard::resized()
     int componentHeight = 16;
     auto b = getLocalBounds().withTrimmedTop(rowHeight - 4);
 
-    releaseRow->button->setBounds(b.withHeight(componentHeight));
+    releaseRow->setBounds(b, rowHeight - 4, componentHeight);
 
     auto r = b.withTrimmedTop(releaseBlockHeight).withHeight(componentHeight);
     for (int i = 0; i < scxt::triggerConditionsPerGroup; ++i)

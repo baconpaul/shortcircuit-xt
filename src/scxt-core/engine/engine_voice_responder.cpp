@@ -101,7 +101,15 @@ int32_t Engine::VoiceManagerResponder::initializeMultipleVoices(
 
     // A release trigger's voices are let go by the very note-off which made them, so no
     // envelope on them can wait on the gate - see Voice::createdByReleaseTrigger
-    auto byReleaseTrigger = engine.inReleaseTriggerPass;
+    auto byReleaseTrigger = engine.voiceCreationPass != VoiceCreationMode::ON_NOTE_ON;
+    auto heldSeconds = engine.ungatedPassHeldSeconds;
+    auto assignReleaseTrigger = [byReleaseTrigger, heldSeconds](voice::Voice *v) {
+        v->createdByReleaseTrigger = byReleaseTrigger;
+        v->releaseCountdownF =
+            byReleaseTrigger
+                ? v->zone->parentGroup->triggerConditions.releaseCountdownAfter(heldSeconds)
+                : 0.f;
+    };
 
     // the alternates step once per note on rather than once per voice, so zones layered on
     // one key all sound with the same value
@@ -139,7 +147,7 @@ int32_t Engine::VoiceManagerResponder::initializeMultipleVoices(
                 v->velocity = velocity;
                 v->originalMidiKey = key;
 
-                v->createdByReleaseTrigger = byReleaseTrigger;
+                assignReleaseTrigger(v);
                 assignAlternate(v);
                 v->attack();
                 glideFromPriorVoice(v, idx);
@@ -173,7 +181,7 @@ int32_t Engine::VoiceManagerResponder::initializeMultipleVoices(
                         (int16_t)std::clamp(velocity * 127.0, 0., 127.));
 
                     v->originalMidiKey = key;
-                    v->createdByReleaseTrigger = byReleaseTrigger;
+                    assignReleaseTrigger(v);
                     assignAlternate(v);
                     v->attack();
                     glideFromPriorVoice(v, idx);

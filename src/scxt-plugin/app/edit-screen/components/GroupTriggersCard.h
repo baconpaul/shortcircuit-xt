@@ -67,8 +67,8 @@ struct GroupTriggersCard : juce::Component, HasEditor
     std::unique_ptr<ReleaseRow> releaseRow;
     bool releaseTriggerOn{false};
 
-    // the release trigger and the rule under it, above the condition stack
-    static constexpr int releaseBlockHeight{26};
+    // the release trigger, its countdown row and the rule under them, above the condition stack
+    static constexpr int releaseBlockHeight{46};
 };
 } // namespace scxt::ui::app::edit_screen
 #endif // GROUPTRIGGERSCARD_H

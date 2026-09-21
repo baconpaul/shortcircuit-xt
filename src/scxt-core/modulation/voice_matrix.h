@@ -408,7 +408,8 @@ struct MatrixEndpoints
                   alternateBipolar{'zvsr', 'altb'}, alternateRotation{'zvsr', 'alt3'},
                   variantCount{'zvsr', 'vcnt', 0}, variantCountFraction{'zvsr', 'vcfr', 0},
                   loopPercentage{'zvsr', 'lppc', 0}, loopCount{'zvsr', 'lpct', 0},
-                  isLooping{'zvsr', 'islp', 0}, samplePercentage{'zvsr', 'sppc', 0}
+                  isLooping{'zvsr', 'islp', 0}, samplePercentage{'zvsr', 'sppc', 0},
+                  releaseCountdown{'zvsr', 'rcnt', 0}
             {
                 registerVoiceModSource(e, isGated, "Voice", "Is Gated");
                 registerVoiceModSource(e, isReleased, "Voice", "Is Released");
@@ -418,6 +419,7 @@ struct MatrixEndpoints
                 registerVoiceModSource(e, samplePercentage, "Voice", "Sample %");
                 registerVoiceModSource(e, loopPercentage, "Voice", "Loop %");
                 registerVoiceModSource(e, loopCount, "Voice", "Loop Count");
+                registerVoiceModSource(e, releaseCountdown, "Voice", "Release Countdown");
 
                 {
                     // narrowest to widest rather than alphabetical
@@ -431,6 +433,7 @@ struct MatrixEndpoints
             SR alternate, alternateBipolar, alternateRotation;
             SR variantCount, variantCountFraction;
             SR isLooping, loopPercentage, samplePercentage, loopCount;
+            SR releaseCountdown;
         } voiceSources;
 
         scxt::modulation::shared::TransportSourceBase<SR, 'ztsp', registerVoiceModSource>

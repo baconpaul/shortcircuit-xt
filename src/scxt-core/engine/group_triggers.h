@@ -28,6 +28,7 @@
 #ifndef SCXT_SRC_SCXT_CORE_ENGINE_GROUP_TRIGGERS_H
 #define SCXT_SRC_SCXT_CORE_ENGINE_GROUP_TRIGGERS_H
 
+#include <algorithm>
 #include <memory>
 #include <array>
 #include <variant>
@@ -230,6 +231,17 @@ struct GroupTriggerConditions
     bool createsVoicesOnRelease() const
     {
         return voiceCreationMode == VoiceCreationMode::ON_NOTE_OFF;
+    }
+
+    static constexpr float defaultReleaseCountdownSeconds{5.f};
+    float releaseCountdownSeconds{defaultReleaseCountdownSeconds};
+
+    // 1 on an instant release, falling to 0 once the hold reaches the countdown
+    float releaseCountdownAfter(double heldSeconds) const
+    {
+        if (releaseCountdownSeconds <= 0.f)
+            return 0.f;
+        return (float)std::clamp(1.0 - heldSeconds / releaseCountdownSeconds, 0.0, 1.0);
     }
 
     bool alwaysReturnsTrue{true};

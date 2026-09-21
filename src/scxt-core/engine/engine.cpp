@@ -372,6 +372,7 @@ bool Engine::processAudio()
 #endif
     messageController->engineProcessRuns++;
     messageController->isAudioRunning = true;
+    samplesProcessed += blockSize;
     auto av = (uint32_t)activeVoices;
 
     drainSerialToEngineQueue();
@@ -1952,7 +1953,7 @@ void Engine::processNoteOnEvent(int16_t port, int16_t channel, int16_t key, int3
         return;
     }
 
-    heldNotes.noteOn(channel, key, note_id, (float)velocity);
+    heldNotes.noteOn(channel, key, note_id, (float)velocity, samplesProcessed);
     voiceManager.processNoteOnEvent(port, channel, key, note_id, velocity, retune);
 }
 
@@ -1984,16 +1985,17 @@ void Engine::fireReleaseTriggers(int16_t port, int16_t channel, int16_t key, int
      * The velocity is the one the note came in with: that is what the release voice plays at,
      * and what decides which of its zones the note lands in.
      */
-    auto velocity = heldNotes.releaseNote(channel, key, note_id);
-    if (velocity < 0.f)
+    auto press = heldNotes.releaseNote(channel, key, note_id);
+    if (!press.found())
         return;
 
     if (!anyGroupCreatesVoicesOnRelease())
         return;
 
-    inReleaseTriggerPass = true;
-    voiceManager.processNoteOnEvent(port, channel, key, note_id, velocity, 0.f);
-    inReleaseTriggerPass = false;
+    voiceCreationPass = VoiceCreationMode::ON_NOTE_OFF;
+    ungatedPassHeldSeconds = secondsSince(press.pressedAt);
+    voiceManager.processNoteOnEvent(port, channel, key, note_id, press.velocity, 0.f);
+    voiceCreationPass = VoiceCreationMode::ON_NOTE_ON;
 }
 
 void Engine::onPartConfigurationUpdated()

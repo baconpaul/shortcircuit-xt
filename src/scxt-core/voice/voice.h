@@ -318,6 +318,8 @@ struct alignas(16) Voice : MoveableOnly<Voice>,
      * editing the group mid-note can't cut a sounding voice short.
      */
     bool createdByReleaseTrigger{false};
+    // what was left of the group's release countdown when the key or pedal came up
+    float releaseCountdownF{0.f};
     scxt::modulation::shared::ReleaseGateSubstitution aegGateSubstitution() const
     {
         return createdByReleaseTrigger

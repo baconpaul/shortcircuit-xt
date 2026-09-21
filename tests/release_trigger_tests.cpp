@@ -143,18 +143,18 @@ TEST_CASE("Held notes remembers the press", "[releasetrigger]")
 
         hn.noteOn(0, 60, -1, 0.75f);
         REQUIRE(hn.heldCount() == 1);
-        REQUIRE(hn.releaseNote(0, 60, -1) == Approx(0.75f));
+        REQUIRE(hn.releaseNote(0, 60, -1).velocity == Approx(0.75f));
         REQUIRE(hn.heldCount() == 0);
     }
 
     SECTION("A note which was never pressed reports nothing")
     {
         scxt::engine::HeldNotes hn;
-        REQUIRE(hn.releaseNote(0, 60, -1) < 0.f);
+        REQUIRE(hn.releaseNote(0, 60, -1).velocity < 0.f);
 
         // and a different key doesn't answer for this one
         hn.noteOn(0, 61, -1, 0.5f);
-        REQUIRE(hn.releaseNote(0, 60, -1) < 0.f);
+        REQUIRE(hn.releaseNote(0, 60, -1).velocity < 0.f);
         REQUIRE(hn.heldCount() == 1);
     }
 
@@ -164,8 +164,8 @@ TEST_CASE("Held notes remembers the press", "[releasetrigger]")
         hn.noteOn(0, 60, -1, 0.25f);
         hn.noteOn(3, 60, -1, 0.9f);
 
-        REQUIRE(hn.releaseNote(3, 60, -1) == Approx(0.9f));
-        REQUIRE(hn.releaseNote(0, 60, -1) == Approx(0.25f));
+        REQUIRE(hn.releaseNote(3, 60, -1).velocity == Approx(0.9f));
+        REQUIRE(hn.releaseNote(0, 60, -1).velocity == Approx(0.25f));
     }
 
     SECTION("CLAP note ids release independently")
@@ -175,9 +175,9 @@ TEST_CASE("Held notes remembers the press", "[releasetrigger]")
         hn.noteOn(0, 60, 12, 0.8f);
         REQUIRE(hn.heldCount() == 2);
 
-        REQUIRE(hn.releaseNote(0, 60, 11) == Approx(0.2f));
+        REQUIRE(hn.releaseNote(0, 60, 11).velocity == Approx(0.2f));
         REQUIRE(hn.heldCount() == 1);
-        REQUIRE(hn.releaseNote(0, 60, 12) == Approx(0.8f));
+        REQUIRE(hn.releaseNote(0, 60, 12).velocity == Approx(0.8f));
         REQUIRE(hn.heldCount() == 0);
     }
 
@@ -193,7 +193,7 @@ TEST_CASE("Held notes remembers the press", "[releasetrigger]")
         hn.noteOn(0, 60, -1, 0.8f);
         REQUIRE(hn.heldCount() == 2);
 
-        REQUIRE(hn.releaseNote(0, 60, -1) == Approx(0.8f));
+        REQUIRE(hn.releaseNote(0, 60, -1).velocity == Approx(0.8f));
         REQUIRE(hn.heldCount() == 0);
     }
 
@@ -201,7 +201,7 @@ TEST_CASE("Held notes remembers the press", "[releasetrigger]")
     {
         scxt::engine::HeldNotes hn;
         hn.noteOn(0, 60, 7, 0.4f);
-        REQUIRE(hn.releaseNote(0, 60, -1) == Approx(0.4f));
+        REQUIRE(hn.releaseNote(0, 60, -1).velocity == Approx(0.4f));
         REQUIRE(hn.heldCount() == 0);
     }
 
@@ -214,7 +214,7 @@ TEST_CASE("Held notes remembers the press", "[releasetrigger]")
 
         hn.clear();
         REQUIRE(hn.heldCount() == 0);
-        REQUIRE(hn.releaseNote(0, 45, -1) < 0.f);
+        REQUIRE(hn.releaseNote(0, 45, -1).velocity < 0.f);
     }
 
     SECTION("Overflow drops the press rather than growing")
@@ -647,4 +647,112 @@ TEST_CASE("A looping release voice still ends when its sample does", "[releasetr
 
     f.runBlocks(80);
     REQUIRE(rel->isVoicePlaying == false);
+}
+
+TEST_CASE("The release countdown is the share of its time left", "[releasetrigger]")
+{
+    scxt::engine::GroupTriggerConditions tc;
+    tc.releaseCountdownSeconds = 5.f;
+
+    REQUIRE(tc.releaseCountdownAfter(0.0) == Approx(1.f));
+    REQUIRE(tc.releaseCountdownAfter(2.5) == Approx(0.5f));
+    REQUIRE(tc.releaseCountdownAfter(5.0) == Approx(0.f));
+    REQUIRE(tc.releaseCountdownAfter(7.0) == Approx(0.f));
+
+    // a zero length countdown has always run out
+    tc.releaseCountdownSeconds = 0.f;
+    REQUIRE(tc.releaseCountdownAfter(0.0) == Approx(0.f));
+}
+
+TEST_CASE("A release voice carries how long its key was held", "[releasetrigger]")
+{
+    std::unique_ptr<scxt::engine::Engine> eng(makeEngine());
+    auto &part = setupGroups(*eng, 2);
+    setVoiceCreation(part, 1, VCM::ON_NOTE_OFF);
+    part.getGroup(1)->triggerConditions.releaseCountdownSeconds = 0.1f;
+
+    // 150 blocks of 16 at 48k is 0.05s
+    auto holdFor = [&](int blocks) {
+        eng->processNoteOnEvent(0, 0, PLAY_KEY, -1, 1.f, 0.f);
+        for (int i = 0; i < blocks; ++i)
+            eng->processAudio();
+        eng->processNoteOffEvent(0, 0, PLAY_KEY, -1, 0.f);
+    };
+
+    SECTION("Released halfway through the countdown")
+    {
+        holdFor(150);
+        auto *v = firstVoiceIn(part, 1);
+        REQUIRE(v);
+        REQUIRE(v->releaseCountdownF == Approx(0.5f).margin(0.001));
+    }
+
+    SECTION("Released after the countdown ran out")
+    {
+        holdFor(600);
+        auto *v = firstVoiceIn(part, 1);
+        REQUIRE(v);
+        REQUIRE(v->releaseCountdownF == Approx(0.f));
+    }
+
+    SECTION("A note on voice reads zero")
+    {
+        eng->processNoteOnEvent(0, 0, PLAY_KEY, -1, 1.f, 0.f);
+        auto *v = firstVoiceIn(part, 0);
+        REQUIRE(v);
+        REQUIRE(v->releaseCountdownF == Approx(0.f));
+    }
+}
+
+TEST_CASE("The release countdown reaches the voice matrix", "[releasetrigger]")
+{
+    namespace vm = scxt::voice::modulation;
+    const auto panT = vm::MatrixConfig::TargetIdentifier{'zout', 'pan ', 0};
+
+    std::unique_ptr<scxt::engine::Engine> eng(makeEngine());
+    auto &part = setupGroups(*eng, 1);
+    setVoiceCreation(part, 0, VCM::ON_NOTE_OFF);
+    part.getGroup(0)->triggerConditions.releaseCountdownSeconds = 0.1f;
+
+    auto &row = part.getGroup(0)->getZone(0)->routingTable.routes[0];
+    row.active = true;
+    row.source = vm::sourcesForScanning().voiceSources.releaseCountdown;
+    row.target = panT;
+    row.depth = 1.f;
+
+    // 225 blocks is 0.075s, leaving a quarter of the countdown
+    eng->processNoteOnEvent(0, 0, PLAY_KEY, -1, 1.f, 0.f);
+    for (int i = 0; i < 225; ++i)
+        eng->processAudio();
+    eng->processNoteOffEvent(0, 0, PLAY_KEY, -1, 0.f);
+
+    // the matrix runs once as the voice starts, so no audio is needed to read it. depth scales
+    // by pan's -1..1 span, so a quarter reads as a half
+    auto *v = firstVoiceIn(part, 0);
+    REQUIRE(v);
+    REQUIRE(v->releaseCountdownF == Approx(0.25f).margin(0.001));
+    REQUIRE(v->modMatrix->getTargetValue(panT) == Approx(0.5f).margin(0.002));
+}
+
+TEST_CASE("Release countdown time streams", "[releasetrigger]")
+{
+    std::unique_ptr<scxt::engine::Engine> eng(makeEngine());
+    auto &part = setupGroups(*eng, 2);
+    part.getGroup(1)->triggerConditions.releaseCountdownSeconds = 2.25f;
+    setVoiceCreation(part, 1, VCM::ON_NOTE_OFF);
+
+    auto json = scxt::json::streamEngineState(*eng);
+
+    std::unique_ptr<scxt::engine::Engine> other(makeEngine());
+    {
+        auto bg = other->getMessageController()->threadingChecker.bypassChecksInScope();
+        scxt::json::unstreamEngineState(*other, json);
+    }
+
+    auto &opart = *other->getPatch()->getPart(0);
+    const auto &tc0 = opart.getGroup(0)->triggerConditions;
+    const auto &tc1 = opart.getGroup(1)->triggerConditions;
+    REQUIRE(tc0.releaseCountdownSeconds ==
+            Approx(scxt::engine::GroupTriggerConditions::defaultReleaseCountdownSeconds));
+    REQUIRE(tc1.releaseCountdownSeconds == Approx(2.25f));
 }
