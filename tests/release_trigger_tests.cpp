@@ -626,3 +626,25 @@ TEST_CASE("A release voice ends when its sample does", "[releasetrigger]")
     f.runBlocks(80);
     REQUIRE(rel->isVoicePlaying == false);
 }
+
+TEST_CASE("A looping release voice still ends when its sample does", "[releasetrigger]")
+{
+    SoundingFixture f;
+    f.shortenReleaseZone(512);
+
+    // an open ended loop would hold a sample gated AEG up forever
+    auto &var = f.part->getGroup(1)->getZone(0)->variantData.variants[0];
+    var.loopActive = true;
+    var.loopMode = scxt::engine::Zone::LOOP_DURING_VOICE;
+    var.startLoop = var.startSample + 128;
+    var.endLoop = var.startSample + 384;
+
+    f.eng->processNoteOnEvent(0, 0, PLAY_KEY, -1, 1.f, 0.f);
+    f.eng->processNoteOffEvent(0, 0, PLAY_KEY, -1, 0.f);
+
+    auto *rel = firstVoiceIn(*f.part, 1);
+    REQUIRE(rel != nullptr);
+
+    f.runBlocks(80);
+    REQUIRE(rel->isVoicePlaying == false);
+}

@@ -318,6 +318,17 @@ struct alignas(16) Voice : MoveableOnly<Voice>,
      * editing the group mid-note can't cut a sounding voice short.
      */
     bool createdByReleaseTrigger{false};
+    scxt::modulation::shared::ReleaseGateSubstitution aegGateSubstitution() const
+    {
+        return createdByReleaseTrigger
+                   ? scxt::modulation::shared::ReleaseGateSubstitution::SAMPLE_GATED
+                   : scxt::modulation::shared::ReleaseGateSubstitution::NONE;
+    }
+    scxt::modulation::shared::ReleaseGateSubstitution egGateSubstitution() const
+    {
+        return createdByReleaseTrigger ? scxt::modulation::shared::ReleaseGateSubstitution::ONE_SHOT
+                                       : scxt::modulation::shared::ReleaseGateSubstitution::NONE;
+    }
 
     /*
      * A voice in a LEGATO group which runs out of sound doesn't die - it parks. It stays
