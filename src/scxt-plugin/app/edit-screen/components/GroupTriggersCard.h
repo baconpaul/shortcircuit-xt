@@ -60,14 +60,14 @@ struct GroupTriggersCard : juce::Component, HasEditor
 
     /*
      * The release trigger sits above the conditions rather than among them: it says which note
-     * event asks them, not whether they hold. The widget wants a bool and the engine carries an
-     * enum (more modes are coming - see #2186), so the two are kept in step by hand.
+     * event asks them, not whether they hold. The widgets want bools and the engine carries an
+     * enum, so the two are kept in step by hand.
      */
     struct ReleaseRow;
     std::unique_ptr<ReleaseRow> releaseRow;
-    bool releaseTriggerOn{false};
+    bool releaseTriggerOn{false}, pedalTriggerOn{false};
 
-    // the release trigger, its countdown row and the rule under them, above the condition stack
+    // the release trigger, its options row and the rule under them, above the condition stack
     static constexpr int releaseBlockHeight{46};
 };
 } // namespace scxt::ui::app::edit_screen

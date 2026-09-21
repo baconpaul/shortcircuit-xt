@@ -100,13 +100,13 @@ GroupTriggerID fromStringGroupTriggerID(const std::string &p);
 /*
  * When a group makes its voices. ON_NOTE_ON is what everything has always done. ON_NOTE_OFF
  * makes the press do nothing but be remembered, and sounds the group when the key comes back
- * up, playing it at the velocity it was pressed with. More modes (sustain pedal release and
- * friends) are coming, hence an enum rather than a bool - see issue #2186.
+ * up, playing it at the velocity it was pressed with. See issue #2186.
  */
 enum struct VoiceCreationMode : int32_t
 {
     ON_NOTE_ON = 0,
-    ON_NOTE_OFF
+    ON_NOTE_OFF,
+    ON_PEDAL_UP // every zone at its root key when the sustain pedal lifts
 };
 
 std::string toStringVoiceCreationMode(const VoiceCreationMode &p);
@@ -232,6 +232,12 @@ struct GroupTriggerConditions
     {
         return voiceCreationMode == VoiceCreationMode::ON_NOTE_OFF;
     }
+    bool createsVoicesOnPedalUp() const
+    {
+        return voiceCreationMode == VoiceCreationMode::ON_PEDAL_UP;
+    }
+    // nothing holds these voices down, so their envelopes can't follow a gate
+    bool createsUngatedVoices() const { return voiceCreationMode != VoiceCreationMode::ON_NOTE_ON; }
 
     static constexpr float defaultReleaseCountdownSeconds{5.f};
     float releaseCountdownSeconds{defaultReleaseCountdownSeconds};

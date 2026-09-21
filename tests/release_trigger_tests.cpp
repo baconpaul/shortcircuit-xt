@@ -739,7 +739,7 @@ TEST_CASE("Release countdown time streams", "[releasetrigger]")
     std::unique_ptr<scxt::engine::Engine> eng(makeEngine());
     auto &part = setupGroups(*eng, 2);
     part.getGroup(1)->triggerConditions.releaseCountdownSeconds = 2.25f;
-    setVoiceCreation(part, 1, VCM::ON_NOTE_OFF);
+    setVoiceCreation(part, 1, VCM::ON_PEDAL_UP);
 
     auto json = scxt::json::streamEngineState(*eng);
 
@@ -755,4 +755,234 @@ TEST_CASE("Release countdown time streams", "[releasetrigger]")
     REQUIRE(tc0.releaseCountdownSeconds ==
             Approx(scxt::engine::GroupTriggerConditions::defaultReleaseCountdownSeconds));
     REQUIRE(tc1.releaseCountdownSeconds == Approx(2.25f));
+    REQUIRE(tc1.voiceCreationMode == VCM::ON_PEDAL_UP);
+}
+
+namespace releasetrigger_test
+{
+static void addRootedZone(scxt::engine::Part &part, int groupIdx, int keyLo, int keyHi, int root,
+                          int velLo = 0, int velHi = 127)
+{
+    addZone(part, groupIdx, keyLo, keyHi, velLo, velHi);
+    part.getGroup(groupIdx)->getZones().back()->mapping.rootKey = root;
+}
+
+static void pedalDown(scxt::engine::Engine &eng, int channel = 0) { midiCC(eng, channel, 64, 127); }
+static void pedalUp(scxt::engine::Engine &eng, int channel = 0) { midiCC(eng, channel, 64, 0); }
+
+// a pedal group of two zones rooted well away from their own key ranges
+static scxt::engine::Part &setupPedalGroup(scxt::engine::Engine &eng)
+{
+    auto &part = *eng.getPatch()->getPart(0);
+    part.addGroup();
+    addRootedZone(part, 0, 0, 10, 40, 0, 10);
+    addRootedZone(part, 0, 100, 110, 90, 0, 10);
+    setVoiceCreation(part, 0, VCM::ON_PEDAL_UP);
+    return part;
+}
+
+static void runBlocks(scxt::engine::Engine &eng, int n)
+{
+    for (int i = 0; i < n; ++i)
+        eng.processAudio();
+}
+} // namespace releasetrigger_test
+
+TEST_CASE("A pedal group sounds when the pedal lifts", "[releasetrigger]")
+{
+    std::unique_ptr<scxt::engine::Engine> eng(makeEngine());
+    auto &part = setupPedalGroup(*eng);
+
+    SECTION("Notes alone sound nothing")
+    {
+        for (auto k : {5, 40, 60, 90, 105})
+        {
+            midiNoteOn(*eng, 0, k, 5);
+            midiNoteOff(*eng, 0, k);
+        }
+        REQUIRE(liveVoices(part, 0) == 0);
+    }
+
+    SECTION("Pressing the pedal sounds nothing, lifting it sounds every zone at its root")
+    {
+        pedalDown(*eng);
+        REQUIRE(liveVoices(part, 0) == 0);
+
+        pedalUp(*eng);
+        REQUIRE(liveVoicesInZone(part, 0, 0) == 1);
+        REQUIRE(liveVoicesInZone(part, 0, 1) == 1);
+
+        for (const auto &zone : part.getGroup(0)->getZones())
+        {
+            for (int i = 0; i < (int)scxt::maxVoices; ++i)
+            {
+                auto *v = zone->voiceWeakPointers[i];
+                if (!v || !v->isVoiceAssigned)
+                    continue;
+                REQUIRE(v->key == zone->mapping.rootKey);
+                REQUIRE(v->createdByReleaseTrigger);
+                REQUIRE(v->isGated == false);
+            }
+        }
+    }
+
+    SECTION("A lift with no press behind it sounds nothing")
+    {
+        pedalUp(*eng);
+        REQUIRE(liveVoices(part, 0) == 0);
+    }
+
+    SECTION("Repeated values are not new presses or lifts")
+    {
+        pedalDown(*eng);
+        pedalDown(*eng);
+        pedalUp(*eng);
+        pedalUp(*eng);
+        REQUIRE(liveVoices(part, 0) == 2);
+    }
+
+    SECTION("The voice manager lets every pedal voice go")
+    {
+        pedalDown(*eng);
+        pedalUp(*eng);
+        REQUIRE(eng->voiceManager.getGatedVoiceCount() == 0);
+        runBlocks(*eng, 8);
+        REQUIRE(liveVoices(part, 0) == 0);
+        REQUIRE(eng->voiceManager.getVoiceCount() == 0);
+    }
+}
+
+TEST_CASE("A pedal lift leaves held keys alone", "[releasetrigger]")
+{
+    std::unique_ptr<scxt::engine::Engine> eng(makeEngine());
+    auto &part = *eng->getPatch()->getPart(0);
+    part.addGroup();
+    part.addGroup();
+    addZone(part, 0, 48, 72);           // plays notes, rooted on 60
+    addRootedZone(part, 1, 48, 72, 60); // the pedal zone shares that key
+    setVoiceCreation(part, 1, VCM::ON_PEDAL_UP);
+
+    pedalDown(*eng);
+    midiNoteOn(*eng, 0, PLAY_KEY, 100);
+    pedalUp(*eng);
+
+    auto *held = firstVoiceIn(part, 0);
+    REQUIRE(held);
+    REQUIRE(held->isGated);
+    REQUIRE(liveVoices(part, 1) == 1);
+    REQUIRE(eng->voiceManager.heldMIDIKeyByChannel[0][PLAY_KEY]);
+
+    midiNoteOff(*eng, 0, PLAY_KEY);
+    REQUIRE(held->isGated == false);
+    REQUIRE(eng->voiceManager.heldMIDIKeyByChannel[0][PLAY_KEY] == false);
+}
+
+TEST_CASE("A pedal voice carries how long the pedal was down", "[releasetrigger]")
+{
+    std::unique_ptr<scxt::engine::Engine> eng(makeEngine());
+    auto &part = setupPedalGroup(*eng);
+    part.getGroup(0)->triggerConditions.releaseCountdownSeconds = 0.1f;
+
+    pedalDown(*eng);
+    runBlocks(*eng, 75); // 0.025s
+    pedalUp(*eng);
+
+    auto *v = firstVoiceIn(part, 0);
+    REQUIRE(v);
+    REQUIRE(v->releaseCountdownF == Approx(0.75f).margin(0.001));
+}
+
+TEST_CASE("Trigger conditions still gate a pedal group", "[releasetrigger]")
+{
+    std::unique_ptr<scxt::engine::Engine> eng(makeEngine());
+    auto &part = setupPedalGroup(*eng);
+
+    auto &tc = part.getGroup(0)->triggerConditions;
+    tc.storage[0].id = scxt::engine::GroupTriggerID::PROGRAM_CHANGE;
+    tc.storage[0].args[0] = 3;
+    tc.storage[0].args[1] = 5;
+    tc.active[0] = true;
+    tc.setupOnUnstream(part.groupTriggerInstrumentState);
+
+    pedalDown(*eng);
+    pedalUp(*eng);
+    REQUIRE(liveVoices(part, 0) == 0);
+
+    uint8_t pc[3]{0xc0, 4, 0};
+    eng->processMIDI1Event(0, pc);
+
+    pedalDown(*eng);
+    pedalUp(*eng);
+    REQUIRE(liveVoices(part, 0) == 2);
+}
+
+TEST_CASE("A pedal round robin moves on lifts, not notes", "[releasetrigger]")
+{
+    std::unique_ptr<scxt::engine::Engine> eng(makeEngine());
+    auto &part = *eng->getPatch()->getPart(0);
+
+    // groups 0 and 1 cycle on the pedal; both cover the played key, which is the trap
+    for (int g = 0; g < 2; ++g)
+    {
+        part.addGroup();
+        addRootedZone(part, g, 48, 72, 60);
+        setVoiceCreation(part, g, VCM::ON_PEDAL_UP);
+        auto &tc = part.getGroup(g)->triggerConditions;
+        tc.storage[0].id = scxt::engine::GroupTriggerID::ROUND_ROBIN_CYCLE;
+        tc.storage[0].args[0] = 0;
+        tc.storage[0].args[1] = (float)(g + 1);
+        tc.active[0] = true;
+        tc.setupOnUnstream(part.groupTriggerInstrumentState);
+    }
+    part.addGroup();
+    addZone(part, 2, 48, 72);
+
+    auto liftAndSounding = [&]() {
+        pedalDown(*eng);
+        pedalUp(*eng);
+        auto res = std::make_pair(liveVoices(part, 0), liveVoices(part, 1));
+        runBlocks(*eng, 8);
+        return res;
+    };
+    auto playNotes = [&]() {
+        for (int i = 0; i < 3; ++i)
+        {
+            midiNoteOn(*eng, 0, PLAY_KEY, 100);
+            midiNoteOff(*eng, 0, PLAY_KEY);
+        }
+        runBlocks(*eng, 8);
+    };
+
+    auto first = liftAndSounding();
+    playNotes();
+    auto second = liftAndSounding();
+    playNotes();
+    auto third = liftAndSounding();
+
+    REQUIRE(first.first + first.second == 1);
+    REQUIRE(second.first + second.second == 1);
+    REQUIRE(first != second);
+    REQUIRE(third == first);
+}
+
+TEST_CASE("A pedal voice ignores its zone's key and velocity fades", "[releasetrigger]")
+{
+    SoundingFixture f;
+    setVoiceCreation(*f.part, 1, VCM::ON_PEDAL_UP);
+
+    // root 60 sits outside a faded range, which would fade a note there to nothing
+    auto &mapping = f.part->getGroup(1)->getZone(0)->mapping;
+    mapping.keyboardRange = {0, 10};
+    mapping.keyboardRange.fadeStart = 4;
+    mapping.keyboardRange.fadeEnd = 4;
+    mapping.velocityRange.velEnd = 100;
+    mapping.velocityRange.fadeEnd = 20;
+
+    pedalDown(*f.eng);
+    pedalUp(*f.eng);
+
+    auto *v = firstVoiceIn(*f.part, 1);
+    REQUIRE(v);
+    REQUIRE(v->key == 60);
+    REQUIRE(v->velKeyFade == Approx(1.f));
 }

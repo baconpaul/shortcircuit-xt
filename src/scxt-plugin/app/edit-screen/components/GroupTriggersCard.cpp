@@ -400,8 +400,9 @@ struct GroupTriggersCard::ConditionRow : juce::Component, HasEditor
     std::unique_ptr<learnToggle_t> learnB;
 };
 /*
- * The release toggle and, once it is on, the countdown behind it. Nested and defined here for
- * the same reason ConditionRow is - it keeps the attachment types out of the header.
+ * The release toggle and, once it is on, the pedal toggle and countdown behind it. Nested and
+ * defined here for the same reason ConditionRow is - it keeps the attachment types out of the
+ * header.
  */
 struct GroupTriggersCard::ReleaseRow
 {
@@ -412,14 +413,15 @@ struct GroupTriggersCard::ReleaseRow
 
     ReleaseRow(GroupTriggersCard *p) : parent(p)
     {
+        using vcm_t = engine::VoiceCreationMode;
+
         releaseA = std::make_unique<booleanAttachment_t>(
             "Release Trigger",
             [w = juce::Component::SafePointer(p)](const auto &a) {
                 if (!w)
                     return;
-                w->cond.voiceCreationMode = w->releaseTriggerOn
-                                                ? engine::VoiceCreationMode::ON_NOTE_OFF
-                                                : engine::VoiceCreationMode::ON_NOTE_ON;
+                w->cond.voiceCreationMode =
+                    w->releaseTriggerOn ? vcm_t::ON_NOTE_OFF : vcm_t::ON_NOTE_ON;
                 w->releaseRow->setupValuesFromData();
                 w->pushUpdate();
             },
@@ -428,6 +430,22 @@ struct GroupTriggersCard::ReleaseRow
         releaseB->setLabel("RELEASE TRIGGER");
         releaseB->setSource(releaseA.get());
         p->addAndMakeVisible(*releaseB);
+
+        pedalA = std::make_unique<booleanAttachment_t>(
+            "On Pedal",
+            [w = juce::Component::SafePointer(p)](const auto &a) {
+                if (!w)
+                    return;
+                w->cond.voiceCreationMode =
+                    w->pedalTriggerOn ? vcm_t::ON_PEDAL_UP : vcm_t::ON_NOTE_OFF;
+                w->releaseRow->setupValuesFromData();
+                w->pushUpdate();
+            },
+            p->pedalTriggerOn);
+        pedalB = std::make_unique<jcmp::ToggleButton>();
+        pedalB->setLabel("ON PEDAL");
+        pedalB->setSource(pedalA.get());
+        p->addChildComponent(*pedalB);
 
         auto md = datamodel::pmd()
                       .asFloat()
@@ -455,13 +473,17 @@ struct GroupTriggersCard::ReleaseRow
 
     void setupValuesFromData()
     {
-        parent->releaseTriggerOn = parent->cond.createsVoicesOnRelease();
+        parent->releaseTriggerOn = parent->cond.createsUngatedVoices();
+        parent->pedalTriggerOn = parent->cond.createsVoicesOnPedalUp();
 
-        // the countdown only means something once voices are made on release
-        countdownM->setVisible(parent->releaseTriggerOn);
-        countdownL->setVisible(parent->releaseTriggerOn);
+        // the options only mean something once voices are made on release
+        auto showOptions = parent->releaseTriggerOn;
+        pedalB->setVisible(showOptions);
+        countdownM->setVisible(showOptions);
+        countdownL->setVisible(showOptions);
 
         releaseB->repaint();
+        pedalB->repaint();
         countdownM->repaint();
     }
 
@@ -471,13 +493,15 @@ struct GroupTriggersCard::ReleaseRow
         releaseB->setBounds(r);
 
         r = r.translated(0, rowHeight);
-        countdownM->setBounds(r.withTrimmedLeft(r.getWidth() - 48));
+        pedalB->setBounds(r.withWidth(64));
+        auto vb = r.withTrimmedLeft(r.getWidth() - 48);
+        countdownM->setBounds(vb);
         countdownL->setBounds(r.withTrimmedLeft(68).withTrimmedRight(52));
     }
 
     GroupTriggersCard *parent{nullptr};
-    std::unique_ptr<booleanAttachment_t> releaseA;
-    std::unique_ptr<jcmp::ToggleButton> releaseB;
+    std::unique_ptr<booleanAttachment_t> releaseA, pedalA;
+    std::unique_ptr<jcmp::ToggleButton> releaseB, pedalB;
     std::unique_ptr<floatAttachment_t> countdownA;
     std::unique_ptr<jcmp::DraggableTextEditableValue> countdownM;
     std::unique_ptr<jcmp::Label> countdownL;

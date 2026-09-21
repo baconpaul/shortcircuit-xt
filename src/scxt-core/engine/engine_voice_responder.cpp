@@ -38,9 +38,17 @@ int32_t Engine::VoiceManagerResponder::beginVoiceCreationTransaction(
                                                         << SCD(noteId) << SCD(velocity));
     assert(!transactionValid);
 
-    auto useKey = engine.midikeyRetuner.remapKeyTo(channel, key);
-    auto nts = engine.findZone(channel, useKey, key, noteId,
-                               std::clamp((int)(velocity * 128), 0, 127), findZoneWorkingBuffer);
+    size_t nts{0};
+    if (engine.voiceCreationPass == VoiceCreationMode::ON_PEDAL_UP)
+    {
+        nts = engine.findPedalZones(channel, key, findZoneWorkingBuffer);
+    }
+    else
+    {
+        auto useKey = engine.midikeyRetuner.remapKeyTo(channel, key);
+        nts = engine.findZone(channel, useKey, key, noteId,
+                              std::clamp((int)(velocity * 128), 0, 127), findZoneWorkingBuffer);
+    }
 
     auto voicesCreated{0};
     for (auto idx = 0; idx < nts; ++idx)
@@ -102,6 +110,7 @@ int32_t Engine::VoiceManagerResponder::initializeMultipleVoices(
     // A release trigger's voices are let go by the very note-off which made them, so no
     // envelope on them can wait on the gate - see Voice::createdByReleaseTrigger
     auto byReleaseTrigger = engine.voiceCreationPass != VoiceCreationMode::ON_NOTE_ON;
+    auto byPedal = engine.voiceCreationPass == VoiceCreationMode::ON_PEDAL_UP;
     auto heldSeconds = engine.ungatedPassHeldSeconds;
     auto assignReleaseTrigger = [byReleaseTrigger, heldSeconds](voice::Voice *v) {
         v->createdByReleaseTrigger = byReleaseTrigger;
@@ -176,9 +185,13 @@ int32_t Engine::VoiceManagerResponder::initializeMultipleVoices(
                 if (v)
                 {
                     v->velocity = velocity;
-                    v->velKeyFade = z->mapping.keyboardRange.fadeAmpltiudeAt(key);
-                    v->velKeyFade *= z->mapping.velocityRange.fadeAmpltiudeAt(
-                        (int16_t)std::clamp(velocity * 127.0, 0., 127.));
+                    // a pedal voice ignores the ranges, so their fades can't silence it
+                    if (!byPedal)
+                    {
+                        v->velKeyFade = z->mapping.keyboardRange.fadeAmpltiudeAt(key);
+                        v->velKeyFade *= z->mapping.velocityRange.fadeAmpltiudeAt(
+                            (int16_t)std::clamp(velocity * 127.0, 0., 127.));
+                    }
 
                     v->originalMidiKey = key;
                     assignReleaseTrigger(v);

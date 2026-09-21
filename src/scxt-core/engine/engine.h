@@ -154,8 +154,52 @@ struct Engine : MoveableOnly<Engine>, SampleRateSupport
     {
         return (double)(samplesProcessed - sampleCount) * sampleRateInv;
     }
-    // how long the key behind the voices now being made was held
+    // how long the key (or pedal) behind the voices now being made was held
     double ungatedPassHeldSeconds{0.0};
+
+    struct SustainPedalState
+    {
+        bool down{false};
+        uint64_t downAt{0};
+    };
+    std::array<SustainPedalState, 16> sustainPedal{};
+    void processSustainPedalEvent(int16_t port, int16_t channel, int16_t value);
+
+    // pedal voices get their own voice manager port, so letting them go can't release a held key
+    static constexpr int16_t pedalTriggerPort{0x7ff0};
+    void firePedalTriggers(int16_t channel, double heldSeconds);
+
+    // zones a pedal lift would sound; askRoundRobin is off while the lift is still advancing sets
+    template <typename F> void forEachPedalZone(int16_t channel, bool askRoundRobin, F &&f)
+    {
+        for (const auto &[pidx, part] : sst::cpputils::enumerate(*patch))
+        {
+            if (part->configuration.mute || part->configuration.muteDueToSolo ||
+                !part->configuration.active || !part->respondsToMIDIChannel(channel))
+                continue;
+
+            auto prex = part->respondsToMIDIChannelExcludingGroupMask(channel);
+            for (const auto &[gidx, group] : sst::cpputils::enumerate(*part))
+            {
+                const auto &tc = group->triggerConditions;
+                if (!tc.createsVoicesOnPedalUp() || group->mutedByLatch)
+                    continue;
+                if (hasFeature::hasGroupMIDIChannel &&
+                    !group->respondsToChannelOrUsesPartChannel(channel, prex))
+                    continue;
+
+                // no key is involved, so -1 keeps a keyswitch from reading one
+                auto plays = askRoundRobin
+                                 ? tc.groupShouldPlay(*this, *group, channel, -1)
+                                 : tc.groupShouldPlayIgnoringRoundRobin(*this, *group, channel, -1);
+                if (!plays)
+                    continue;
+
+                for (const auto &[zidx, zone] : sst::cpputils::enumerate(*group))
+                    f(*part, *group, *zone, (size_t)pidx, (size_t)gidx, (size_t)zidx);
+            }
+        }
+    }
 
     struct pathToZone_t
     {
@@ -318,6 +362,9 @@ struct Engine : MoveableOnly<Engine>, SampleRateSupport
         }
         return idx;
     }
+
+    // the pedal pass's findZone: zones rooted on key, whatever their key and velocity ranges
+    size_t findPedalZones(int16_t channel, int16_t key, std::array<pathToZone_t, maxVoices> &res);
 
     void onPartConfigurationUpdated();
 
