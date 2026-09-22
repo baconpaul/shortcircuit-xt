@@ -70,6 +70,9 @@ struct DropGeometry
     bool shift{false}; // spread over velocity rather than the keyboard
     bool alt{false};   // collapse to one range, to be stacked as variants
 
+    // bends a velocity split: -1 concave, 0 even bands, +1 convex
+    float velocityBend{0.f};
+
     // an sfz or similar carries its own mapping, so the gesture is ignored
     bool isMappedInstrument{false};
 };

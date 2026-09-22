@@ -406,3 +406,72 @@ TEST_CASE("Drop Geometry Over The Keyboard")
         REQUIRE(r[0].keyHi == 55);
     }
 }
+
+TEST_CASE("Drop Geometry Velocity Bend")
+{
+    auto split = [](int n, float bend) {
+        auto g = at(n, 60, 0.5);
+        g.shift = true;
+        g.velocityBend = bend;
+        return scxt::engine::dropRangesFor(g);
+    };
+
+    SECTION("a bend still tiles the whole velocity range")
+    {
+        for (float bend : {-1.f, -0.5f, 0.f, 0.5f, 1.f})
+        {
+            for (int n : {2, 3, 5, 9})
+            {
+                auto r = split(n, bend);
+                INFO("bend " << bend << " n " << n);
+                REQUIRE((int)r.size() == n);
+                requireWellFormed(r);
+                REQUIRE(r.front().velLo == 0);
+                REQUIRE(r.back().velHi == 127);
+                for (size_t i = 1; i < r.size(); ++i)
+                    REQUIRE(r[i].velLo == r[i - 1].velHi + 1);
+            }
+        }
+    }
+
+    SECTION("no bend leaves the bands even")
+    {
+        auto r = split(4, 0.f);
+        REQUIRE(r[0].velHi == 32);
+        REQUIRE(r[1].velHi == 64);
+        REQUIRE(r[2].velHi == 95);
+    }
+
+    SECTION("convex widens the soft layers, concave widens the loud ones")
+    {
+        auto even = split(4, 0.f);
+        auto convex = split(4, 1.f);
+        auto concave = split(4, -1.f);
+
+        REQUIRE(convex[0].velHi > even[0].velHi);
+        REQUIRE(concave[0].velHi < even[0].velHi);
+    }
+
+    SECTION("the bend is monotonic in its own parameter")
+    {
+        auto prev = split(5, -1.f)[0].velHi;
+        for (float bend = -1.f; bend <= 1.f; bend += 0.1f)
+        {
+            auto v = split(5, bend)[0].velHi;
+            INFO("bend " << bend << " first band ends at " << v << " previous " << prev);
+            REQUIRE(v >= prev);
+            prev = v;
+        }
+    }
+
+    SECTION("bend is ignored when the drop is not splitting over velocity")
+    {
+        auto g = at(4, 60, 0.5);
+        g.velocityBend = 1.f;
+        for (const auto &e : scxt::engine::dropRangesFor(g))
+        {
+            REQUIRE(e.velLo == 0);
+            REQUIRE(e.velHi == 127);
+        }
+    }
+}

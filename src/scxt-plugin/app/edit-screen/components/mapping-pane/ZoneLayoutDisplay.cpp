@@ -1113,6 +1113,9 @@ std::vector<engine::DropRange> ZoneLayoutDisplay::rootAndRangeForPosition(const 
     g.shift = mods.isShiftDown();
     g.alt = mods.isAltDown();
     g.isMappedInstrument = isMappedInstrument;
+    // ctrl hands the vertical travel a second job: bending the velocity split
+    if (mods.isCtrlDown())
+        g.velocityBend = std::clamp(1.f - 2.f * g.fromTop, -1.f, 1.f);
 
     return engine::dropRangesFor(g);
 }
