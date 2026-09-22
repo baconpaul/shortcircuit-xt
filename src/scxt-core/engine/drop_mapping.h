@@ -63,12 +63,25 @@ struct DropGeometry
     // 0 at the top of the mapping area, 1 at the bottom
     float fromTop{0.f};
 
+    // the virtual keyboard below the mapping area, which has gestures of its own
+    bool overKeyboard{false};
+    bool inLowerKeyboardHalf{false};
+
     bool shift{false}; // spread over velocity rather than the keyboard
     bool alt{false};   // collapse to one range, to be stacked as variants
 
     // an sfz or similar carries its own mapping, so the gesture is ignored
     bool isMappedInstrument{false};
 };
+
+/**
+ * Keys per zone the vertical travel selects: 1 to 12 as Kontakt and Falcon do,
+ * then the 2, 3, 4 and 5 octave steps HALion adds above them.
+ */
+int16_t zoneWidthAt(float fromTop);
+
+/** The top of the travel overlaps every dropped sample across the whole keyboard. */
+bool isFullOverlapAt(float fromTop);
 
 /**
  * One range per dropped element, in drop order. Always at least one entry, and
