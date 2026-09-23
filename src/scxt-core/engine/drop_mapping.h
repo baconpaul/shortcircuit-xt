@@ -78,13 +78,16 @@ struct DropGeometry
 };
 
 /**
- * Keys per zone the vertical travel selects: 1 to 12 as Kontakt and Falcon do,
- * then the 2, 3, 4 and 5 octave steps HALion adds above them.
+ * Semitones a zone spans at this point in the pull. The first 70% runs 0 to 24
+ * evenly; the rest climbs in octaves to a span that fills the keyboard.
  */
-int16_t zoneWidthAt(float fromTop);
+int16_t zoneSpanAt(float fromTop);
 
-/** The top of the travel overlaps every dropped sample across the whole keyboard. */
-bool isFullOverlapAt(float fromTop);
+/**
+ * At the top of the pull a zone that will not fit slides its start down rather
+ * than being truncated, so a single sample can be dragged to fill the keyboard.
+ */
+bool isFitToKeyboardAt(float fromTop);
 
 /**
  * One range per dropped element, in drop order. Always at least one entry, and

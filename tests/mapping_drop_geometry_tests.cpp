@@ -27,6 +27,7 @@
 
 #include "catch2/catch2.hpp"
 
+#include <cmath>
 #include <set>
 
 #include "engine/drop_mapping.h"
@@ -216,41 +217,58 @@ TEST_CASE("Drop Geometry Velocity Spread")
     }
 }
 
-TEST_CASE("Drop Geometry Width Ladder")
+TEST_CASE("Drop Geometry Span Ladder")
 {
-    SECTION("the travel runs widest at the top to one key at the bottom")
+    SECTION("the pull runs from a single key to the whole keyboard")
     {
-        REQUIRE(scxt::engine::zoneWidthAt(0.f) == 60);
-        REQUIRE(scxt::engine::zoneWidthAt(1.f) == 1);
+        REQUIRE(scxt::engine::zoneSpanAt(1.f) == 0);
+        REQUIRE(scxt::engine::zoneSpanAt(0.f) == 127);
     }
 
-    SECTION("width never widens as the cursor moves down")
+    SECTION("the first 70% of the pull runs 0 to 24 evenly")
     {
-        auto prev = scxt::engine::zoneWidthAt(0.f);
-        for (float t = 0.f; t <= 1.f; t += 0.01f)
+        // fromTop is the other way up, so 70% of the pull ends at 0.3
+        REQUIRE(scxt::engine::zoneSpanAt(0.3f) == 24);
+        REQUIRE(scxt::engine::zoneSpanAt(0.65f) == 12);
+        REQUIRE(scxt::engine::zoneSpanAt(1.f - 0.35f) == 12);
+
+        // evenly: equal steps of pull give equal steps of span
+        for (int i = 0; i <= 10; ++i)
         {
-            auto w = scxt::engine::zoneWidthAt(t);
-            INFO("fromTop " << t << " width " << w << " previous " << prev);
+            auto pull = 0.7f * i / 10;
+            INFO("pull " << pull);
+            REQUIRE(scxt::engine::zoneSpanAt(1.f - pull) == (int16_t)std::round(pull / 0.7f * 24));
+        }
+    }
+
+    SECTION("the last 30% climbs in octaves")
+    {
+        std::set<int> wide;
+        for (float pull = 0.7001f; pull <= 1.f; pull += 0.001f)
+            wide.insert(scxt::engine::zoneSpanAt(1.f - pull));
+
+        std::set<int> expected{36, 48, 60, 72, 84, 96, 108, 120, 127};
+        REQUIRE(wide == expected);
+    }
+
+    SECTION("span never widens as the cursor moves down")
+    {
+        auto prev = scxt::engine::zoneSpanAt(0.f);
+        for (float t = 0.f; t <= 1.f; t += 0.005f)
+        {
+            auto w = scxt::engine::zoneSpanAt(t);
+            INFO("fromTop " << t << " span " << w << " previous " << prev);
             REQUIRE(w <= prev);
             prev = w;
         }
     }
 
-    SECTION("every rung is reachable and no other width is")
+    SECTION("only the top 10% slides the start to make room")
     {
-        std::set<int> seen;
-        for (float t = 0.f; t <= 1.f; t += 0.001f)
-            seen.insert(scxt::engine::zoneWidthAt(t));
-
-        std::set<int> expected{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 24, 36, 48, 60};
-        REQUIRE(seen == expected);
-    }
-
-    SECTION("only the top of the travel is the full overlap band")
-    {
-        REQUIRE(scxt::engine::isFullOverlapAt(0.f));
-        REQUIRE(!scxt::engine::isFullOverlapAt(0.5f));
-        REQUIRE(!scxt::engine::isFullOverlapAt(1.f));
+        REQUIRE(scxt::engine::isFitToKeyboardAt(0.f));
+        REQUIRE(scxt::engine::isFitToKeyboardAt(0.05f));
+        REQUIRE(!scxt::engine::isFitToKeyboardAt(0.2f));
+        REQUIRE(!scxt::engine::isFitToKeyboardAt(1.f));
     }
 }
 
@@ -260,7 +278,7 @@ TEST_CASE("Drop Geometry Anchors Left")
     {
         auto g = at(4, 40, 0.6);
         auto r = scxt::engine::dropRangesFor(g);
-        auto w = scxt::engine::zoneWidthAt(0.6);
+        auto w = scxt::engine::zoneSpanAt(0.6) + 1;
 
         REQUIRE(r.size() == 4);
         REQUIRE(r[0].keyLo == 40);
@@ -291,7 +309,7 @@ TEST_CASE("Drop Geometry Anchors Left")
         REQUIRE(r.size() == 1);
         REQUIRE(r[0].keyLo == 48);
         REQUIRE(r[0].root == 48);
-        REQUIRE(r[0].keyHi == 48 + scxt::engine::zoneWidthAt(0.5) - 1);
+        REQUIRE(r[0].keyHi == 48 + scxt::engine::zoneSpanAt(0.5));
     }
 }
 
@@ -309,7 +327,7 @@ TEST_CASE("Drop Geometry Scrunches The Overflow")
 
     SECTION("a zone straddling the end is truncated, not moved")
     {
-        auto w = scxt::engine::zoneWidthAt(0.5);
+        auto w = scxt::engine::zoneSpanAt(0.5) + 1;
         auto r = scxt::engine::dropRangesFor(at(1, (float)(127 - w / 2), 0.5));
         REQUIRE(r[0].keyHi == 127);
         REQUIRE(r[0].keyLo == 127 - w / 2);
@@ -328,9 +346,9 @@ TEST_CASE("Drop Geometry Scrunches The Overflow")
     }
 }
 
-TEST_CASE("Drop Geometry Full Overlap Band")
+TEST_CASE("Drop Geometry Fills The Keyboard At The Top")
 {
-    SECTION("the top of the travel overlaps everything across the keyboard")
+    SECTION("the top of the pull gives every sample the whole keyboard")
     {
         auto r = scxt::engine::dropRangesFor(at(5, 60, 0.f));
         REQUIRE(r.size() == 5);
@@ -473,5 +491,51 @@ TEST_CASE("Drop Geometry Velocity Bend")
             REQUIRE(e.velLo == 0);
             REQUIRE(e.velHi == 127);
         }
+    }
+}
+
+TEST_CASE("Drop Geometry Start Slides Only At The Top")
+{
+    SECTION("a single sample at the top of the pull fills the keyboard from anywhere")
+    {
+        for (float key : {0.f, 40.f, 60.f, 100.f, 127.f})
+        {
+            auto r = scxt::engine::dropRangesFor(at(1, key, 0.f));
+            INFO("dropped at key " << key);
+            REQUIRE(r.size() == 1);
+            REQUIRE(r[0].keyLo == 0);
+            REQUIRE(r[0].keyHi == 127);
+        }
+    }
+
+    SECTION("just inside the top the start slides only as far as it needs to")
+    {
+        auto span = scxt::engine::zoneSpanAt(0.05f);
+        REQUIRE(scxt::engine::isFitToKeyboardAt(0.05f));
+
+        // low down there is room, so the zone stays under the cursor
+        auto low = scxt::engine::dropRangesFor(at(1, 3, 0.05f));
+        REQUIRE(low[0].keyLo == 3);
+
+        // high up there is not, so it slides back to fit rather than truncating
+        auto high = scxt::engine::dropRangesFor(at(1, 120, 0.05f));
+        REQUIRE(high[0].keyLo == 127 - span);
+        REQUIRE(high[0].keyHi == 127);
+    }
+
+    SECTION("below the top the zone truncates instead of sliding")
+    {
+        // 0.2 is outside the top 10% but still in the octave region
+        REQUIRE(!scxt::engine::isFitToKeyboardAt(0.2f));
+        auto r = scxt::engine::dropRangesFor(at(1, 120, 0.2f));
+        REQUIRE(r[0].keyLo == 120);
+        REQUIRE(r[0].keyHi == 127);
+    }
+
+    SECTION("the root follows the cursor once the start has slid away from it")
+    {
+        auto r = scxt::engine::dropRangesFor(at(1, 90, 0.f));
+        REQUIRE(r[0].keyLo == 0);
+        REQUIRE(r[0].root == 90);
     }
 }

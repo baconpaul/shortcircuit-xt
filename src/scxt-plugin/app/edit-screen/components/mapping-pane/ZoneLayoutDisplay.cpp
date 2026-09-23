@@ -1107,15 +1107,34 @@ std::vector<engine::DropRange> ZoneLayoutDisplay::rootAndRangeForPosition(const 
     g.key = std::clamp(lp.getX() * 1.f / kw + ZoneLayoutKeyboard::firstMidiNote + k0,
                        (float)ZoneLayoutKeyboard::firstMidiNote,
                        (float)ZoneLayoutKeyboard::lastMidiNote);
-    g.fromTop = std::clamp(lp.getY(), 0, getHeight()) * 1.f / getHeight();
     g.overKeyboard = belowUs >= 0;
     g.inLowerKeyboardHalf = belowUs >= kbdHeight / 2;
     g.shift = mods.isShiftDown();
     g.alt = mods.isAltDown();
     g.isMappedInstrument = isMappedInstrument;
-    // ctrl hands the vertical travel a second job: bending the velocity split
+
+    auto fromTop = std::clamp(lp.getY(), 0, getHeight()) * 1.f / getHeight();
+
+    // ctrl freezes the span where it was and hands the rest of the pull to the distribution
     if (mods.isCtrlDown())
-        g.velocityBend = std::clamp(1.f - 2.f * g.fromTop, -1.f, 1.f);
+    {
+        if (display->ctrlLatchFromTop < 0.f)
+            display->ctrlLatchFromTop = fromTop;
+    }
+    else
+    {
+        display->ctrlLatchFromTop = -1.f;
+    }
+
+    if (display->ctrlLatchFromTop >= 0.f)
+    {
+        g.fromTop = display->ctrlLatchFromTop;
+        g.velocityBend = std::clamp(2.f * (display->ctrlLatchFromTop - fromTop), -1.f, 1.f);
+    }
+    else
+    {
+        g.fromTop = fromTop;
+    }
 
     return engine::dropRangesFor(g);
 }

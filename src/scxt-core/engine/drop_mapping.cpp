@@ -35,11 +35,15 @@ namespace scxt::engine
 {
 namespace
 {
-// widest first, so the top of the travel is the widest zone
-constexpr std::array<int16_t, 16> widthLadder{60, 48, 36, 24, 12, 11, 10, 9,
-                                              8,  7,  6,  5,  4,  3,  2,  1};
+// above 24 semitones the pull climbs in octaves, and the last rung fills the keyboard
+constexpr std::array<int16_t, 9> octaveRungs{36, 48, 60, 72, 84, 96, 108, 120, 127};
 
-constexpr float fullOverlapBand{0.05f};
+constexpr float evenPortion{0.7f}; // the first 70% of the pull runs 0..24 evenly
+constexpr int16_t evenTopSpan{24};
+constexpr float fitToKeyboardBand{0.9f}; // the top 10% pulls the start down to make room
+
+// the pull runs the other way to fromTop: 0 at the bottom of the travel, 1 at the top
+float pullOf(float fromTop) { return 1.f - std::clamp(fromTop, 0.f, 1.f); }
 
 int16_t lastKeyOf(int firstKey, int width) { return (int16_t)std::min(firstKey + width - 1, 127); }
 
@@ -70,13 +74,18 @@ std::vector<DropRange> velocitySplit(int n, int16_t root, int16_t keyLo, int16_t
 }
 } // namespace
 
-bool isFullOverlapAt(float fromTop) { return fromTop <= fullOverlapBand; }
+bool isFitToKeyboardAt(float fromTop) { return pullOf(fromTop) >= fitToKeyboardBand; }
 
-int16_t zoneWidthAt(float fromTop)
+int16_t zoneSpanAt(float fromTop)
 {
-    auto t = std::clamp((fromTop - fullOverlapBand) / (1.f - fullOverlapBand), 0.f, 1.f);
-    auto steps = (int)widthLadder.size();
-    return widthLadder[std::clamp((int)(t * steps), 0, steps - 1)];
+    auto pull = pullOf(fromTop);
+
+    if (pull <= evenPortion)
+        return (int16_t)std::round(pull / evenPortion * evenTopSpan);
+
+    auto t = (pull - evenPortion) / (1.f - evenPortion);
+    auto rungs = (int)octaveRungs.size();
+    return octaveRungs[std::clamp((int)(t * rungs), 0, rungs - 1)];
 }
 
 std::vector<DropRange> dropRangesFor(const DropGeometry &g)
@@ -86,47 +95,37 @@ std::vector<DropRange> dropRangesFor(const DropGeometry &g)
 
     auto n = g.nElements;
     auto key = (int16_t)std::clamp(g.key, 0.f, 127.f);
-    auto width = zoneWidthAt(g.fromTop);
+    auto span = g.overKeyboard ? (int16_t)0 : zoneSpanAt(g.fromTop);
+    auto width = span + 1;
 
-    // the root is the left edge of the zone, and the cursor is the left edge of the spread
-    int16_t root{key}, firstLo{key}, firstHi{lastKeyOf(key, width)};
-    bool overlapAll{false};
+    // at the top of the pull the start slides down to make room, which is what gives a
+    // single sample the whole keyboard; everywhere else the overflow piles onto the last note
+    auto lastStart =
+        isFitToKeyboardAt(g.fromTop) && !g.overKeyboard ? std::max(127 - span, 0) : 127;
 
-    if (g.overKeyboard)
-    {
-        // everything lands on the one key under the cursor
-        firstLo = key;
-        firstHi = key;
-        overlapAll = true;
-    }
-    else if (isFullOverlapAt(g.fromTop))
-    {
-        firstLo = 0;
-        firstHi = 127;
-        overlapAll = true;
-    }
+    auto zoneAt = [&](int i) {
+        auto lo = (int16_t)std::clamp(std::min(key + i * width, lastStart), 0, 127);
+        auto hi = lastKeyOf(lo, width);
+        // the root is the zone's left edge, except where the start slid away from the cursor
+        return DropRange((int16_t)std::clamp((int)key, (int)lo, (int)hi), lo, hi);
+    };
+
+    auto first = zoneAt(0);
 
     if (g.alt)
-        return {{root, firstLo, firstHi}};
+        return {first};
 
     // the upper half of the keyboard splits over velocity without needing shift
     if (g.shift || (g.overKeyboard && !g.inLowerKeyboardHalf))
-        return velocitySplit(n, root, firstLo, firstHi, g.velocityBend);
+        return velocitySplit(n, first.root, first.keyLo, first.keyHi, g.velocityBend);
 
-    if (overlapAll)
-        return std::vector<DropRange>(n, DropRange(root, firstLo, firstHi));
+    if (g.overKeyboard)
+        return std::vector<DropRange>(n, first);
 
     std::vector<DropRange> ranges;
     ranges.reserve(n);
     for (int i = 0; i < n; ++i)
-    {
-        auto lo = key + i * width;
-        // what runs off the end of the keyboard piles up on the last note
-        if (lo > 127)
-            ranges.emplace_back(127, 127, 127);
-        else
-            ranges.emplace_back((int16_t)lo, (int16_t)lo, lastKeyOf(lo, width));
-    }
+        ranges.push_back(zoneAt(i));
     return ranges;
 }
 
